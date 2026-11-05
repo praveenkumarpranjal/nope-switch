@@ -1,0 +1,50 @@
+rules:
+  - id: nope.credentials-in-logs.logger
+    message: Never log credentials or tokens; store an opaque identifier or redact first.
+    severity: ERROR
+    languages: [typescript, javascript]
+    patterns:
+      - pattern-inside: logger.$METHOD(...)
+      - pattern-either:
+          - pattern: authorization
+          - pattern: Authorization
+          - pattern: $REQ.headers.authorization
+          - pattern: $REQ.headers.Authorization
+          - pattern: $REQ.headers['authorization']
+          - pattern: '$REQ.headers["authorization"]'
+          - pattern: $REQ.headers['Authorization']
+          - pattern: '$REQ.headers["Authorization"]'
+          - pattern: accessToken
+          - pattern: access_token
+          - pattern: idToken
+          - pattern: x-access-token
+          - pattern: x-api-key
+    metadata:
+      scar: SCAR-001
+      incident: INC-014
+      remediation: Remove the credential material; log an actor or request correlation ID instead.
+
+  - id: nope.credentials-in-logs.console
+    message: Never log credentials or tokens; store an opaque identifier or redact first.
+    severity: ERROR
+    languages: [typescript, javascript]
+    patterns:
+      - pattern-inside: console.$METHOD(...)
+      - pattern-either:
+          - pattern: authorization
+          - pattern: Authorization
+          - pattern: $REQ.headers.authorization
+          - pattern: $REQ.headers.Authorization
+          - pattern: $REQ.headers['authorization']
+          - pattern: '$REQ.headers["authorization"]'
+          - pattern: $REQ.headers['Authorization']
+          - pattern: '$REQ.headers["Authorization"]'
+          - pattern: accessToken
+          - pattern: access_token
+          - pattern: idToken
+          - pattern: x-access-token
+          - pattern: x-api-key
+    metadata:
+      scar: SCAR-001
+      incident: INC-014
+      remediation: Remove the credential material; log an actor or request correlation ID instead.

@@ -1,0 +1,21 @@
+{
+  "name": "nope-demo-target",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Strict TypeScript target service used to exercise NOPE's enforcement workflow and CI failure reporting.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/**/*.test.js",
+    "start": "node dist/src/server.js",
+    "typecheck": "tsc --noEmit",
+    "prove:bad-commit": "node scripts/introduce-violation.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

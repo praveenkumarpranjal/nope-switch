@@ -1,0 +1,14 @@
+{
+  "title": "Never expose authentication credentials in logs",
+  "incident_summary": "Authorization headers appeared in application logs during a production authentication path and were later copied into monitoring output.",
+  "invariant": "Credential material must never reach application logs, including authorization headers, access tokens and API keys.",
+  "rationale": "Logs are broadly readable, retained for long periods and forwarded to third-party monitoring systems. A credential in a log is indistinguishable from a credential leak.",
+  "remediation": "Delete the credential from the log call; use an actor ID, request correlation ID or a redacted value such as logged_by: user.id.",
+  "incident_url": "https://github.com/example/acme/issues/014",
+  "repository": "acme/payments-api",
+  "scope": "src/",
+  "severity": "critical",
+  "enforcement": "semgrep",
+  "origin": "INC-014: auth headers in app logs, 2026-09-14",
+  "proposed_by": "switch:@nope"
+}
