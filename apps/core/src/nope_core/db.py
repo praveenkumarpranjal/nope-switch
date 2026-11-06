@@ -3,10 +3,18 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, func, select
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
-
 from nope_core.config import settings
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    create_engine,
+    func,
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 
 class Base(DeclarativeBase):

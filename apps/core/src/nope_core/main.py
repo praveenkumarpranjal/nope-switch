@@ -1,19 +1,16 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
-from sqlalchemy import select
-
 from nope_core import scar_service
-from nope_core.auth import AdminRequired, AgentRequired, ApproverRequired, CiRequired, authorize, Role
+from nope_core.auth import AgentRequired, ApproverRequired, CiRequired
 from nope_core.config import settings
-from nope_core.db import AuditEvent, Scar, SessionLocal, init_db
+from nope_core.db import AuditEvent, Scar, SessionLocal, init_db, new_id
 from nope_core.rule_lab import RuleLab, RuleLabError
 from nope_core.schemas import (
     ApprovalRequest,
@@ -21,9 +18,13 @@ from nope_core.schemas import (
     CreateScarRequest,
     ValidateScarRequest,
 )
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     init_db()
     yield
 
@@ -38,7 +39,7 @@ def health() -> dict[str, Any]:
 
 
 @app.get("/v1/scars")
-def list_scars(_: Any = Depends(authorize(Role.AGENT))) -> list[dict[str, Any]]:
+def list_scars(_: AgentRequired) -> list[dict[str, Any]]:
     with SessionLocal() as db:
         return [scar_service.scar_response(scar).model_dump(mode="json") for scar in scar_service.list_scars(db)]
 
@@ -51,17 +52,18 @@ def create_scar(payload: CreateScarRequest, actor: AgentRequired) -> dict[str, A
         return scar_service.scar_response(scar).model_dump(mode="json")
 
 
-def _load_scar(db, scar_id_or_number: str) -> Scar | None:
-    scar = db.get(Scar, scar_id_or_number)
-    if scar:
+def _load_scar(db: Session, scar_id_or_number: str) -> Scar | None:
+    scar: Scar | None = db.get(Scar, scar_id_or_number)
+    if scar is not None:
         return scar
     if scar_id_or_number.isdigit():
-        return scar_service.get_scar_by_number(db, int(scar_id_or_number))
+        scar = db.scalar(select(Scar).where(Scar.number == int(scar_id_or_number)))
+        return scar
     return None
 
 
 @app.get("/v1/scars/{scar_id_or_number}")
-def get_scar(scar_id_or_number: str, _: Any = Depends(authorize(Role.AGENT))) -> dict[str, Any]:
+def get_scar(scar_id_or_number: str, _: AgentRequired) -> dict[str, Any]:
     with SessionLocal() as db:
         scar = _load_scar(db, scar_id_or_number)
         if not scar:
@@ -175,7 +177,7 @@ def ci_failure(payload: CiFailure, actor: CiRequired) -> dict[str, Any]:
         if not scar:
             raise HTTPException(status_code=404, detail="Scar not found")
         db.add(AuditEvent(
-            id=f"ci_{datetime.now(timezone.utc).timestamp():.0f}_{payload.scar_number}",
+            id=new_id("ci"),
             scar_id=scar.id,
             actor=actor,
             action="ci.failure_observed",
@@ -192,7 +194,7 @@ def ci_failure(payload: CiFailure, actor: CiRequired) -> dict[str, Any]:
 
 
 @app.get("/v1/audit")
-def audit(limit: int = 100, _: Any = Depends(authorize(Role.APPROVER))) -> list[dict[str, Any]]:
+def audit(_: ApproverRequired, limit: int = 100) -> list[dict[str, Any]]:
     limit = max(1, min(limit, 500))
     with SessionLocal() as db:
         rows = db.scalars(select(AuditEvent).order_by(AuditEvent.occurred_at.desc()).limit(limit)).all()

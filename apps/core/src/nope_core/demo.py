@@ -2,25 +2,26 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
-from sqlalchemy import select
-
-from nope_core.config import settings
-from nope_core.db import Scar, SessionLocal, init_db
 from nope_core import scar_service
+from nope_core.db import Scar, SessionLocal, init_db
 from nope_core.rule_lab import RuleLab
-from nope_core.schemas import ApprovalRequest, ChallengeRequest, CreateScarRequest
+from nope_core.schemas import CreateScarRequest
+from sqlalchemy import select
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DEMO = REPO_ROOT / "demo-app"
 
 
-def _load_json(path: Path) -> dict:
-    return json.loads(path.read_text(encoding="utf-8"))
+def _load_json(path: Path) -> dict[str, Any]:
+    parsed = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(parsed, dict):
+        raise SystemExit(f"{path} must contain a JSON object")
+    return parsed
 
 
 def _print(title: str, body: object) -> None:
@@ -123,18 +124,27 @@ def main() -> None:
     sub.add_parser("reset")
     sub.add_parser("teach")
     sub.add_parser("validate")
-    approval = sub.add_parser("approve"); approval.add_argument("number", type=int)
-    activation = sub.add_parser("activate"); activation.add_argument("number", type=int)
+    approval = sub.add_parser("approve")
+    approval.add_argument("number", type=int)
+    activation = sub.add_parser("activate")
+    activation.add_argument("number", type=int)
     sub.add_parser("scan-good")
     sub.add_parser("scan-bad")
     args = parser.parse_args()
-    if args.command == "reset": reset()
-    elif args.command == "teach": teach()
-    elif args.command == "validate": validate()
-    elif args.command == "approve": approve(args.number)
-    elif args.command == "activate": activate(args.number)
-    elif args.command == "scan-good": raise SystemExit(_semgrep(DEMO / "src", False))
-    elif args.command == "scan-bad": raise SystemExit(_semgrep(DEMO / "fixtures" / "bad-authorization-log.ts", True))
+    if args.command == "reset":
+        reset()
+    elif args.command == "teach":
+        teach()
+    elif args.command == "validate":
+        validate()
+    elif args.command == "approve":
+        approve(args.number)
+    elif args.command == "activate":
+        activate(args.number)
+    elif args.command == "scan-good":
+        raise SystemExit(_semgrep(DEMO / "src", False))
+    elif args.command == "scan-bad":
+        raise SystemExit(_semgrep(DEMO / "fixtures" / "bad-authorization-log.ts", True))
 
 if __name__ == "__main__":
     main()

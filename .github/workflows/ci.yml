@@ -1,0 +1,49 @@
+name: NOPE CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: nope-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: demo-app/package-lock.json
+
+      - name: Install Semgrep and uv
+        run: |
+          python -m pip install --upgrade pip setuptools
+          python -m pip install semgrep uv
+
+      - name: Python checks
+        run: |
+          uv sync --extra dev --extra semgrep
+          uv run ruff check .
+          uv run mypy -p nope_core
+          uv run pytest
+
+      - name: Target service checks
+        run: |
+          npm --prefix demo-app ci
+          npm --prefix demo-app run test
+          npm --prefix demo-app run typecheck
+
+      - name: NOPE enforcement (new findings only)
+        env:
+          GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: sh scripts/enforce.sh

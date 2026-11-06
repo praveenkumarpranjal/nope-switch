@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
-
-from nope_core.db import Base, SessionLocal, engine
+from nope_core.db import Base, engine
 from nope_core.main import app
 
 

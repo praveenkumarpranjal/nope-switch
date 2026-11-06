@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import os
+from collections.abc import Awaitable, Callable
 from enum import IntEnum
 from typing import Annotated
 
@@ -39,7 +40,7 @@ API_KEYS = parse_api_keys()
 ALLOW_ANONYMOUS = os.getenv("NOPE_ALLOW_ANONYMOUS", "false").lower() == "true"
 
 
-def authorize(minimum: Role):
+def authorize(minimum: Role) -> Callable[[Annotated[str | None, Header()]], Awaitable[str]]:
     async def dependency(x_nope_key: Annotated[str | None, Header()] = None) -> str:
         if not x_nope_key:
             if ALLOW_ANONYMOUS:

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from nope_core.rule_lab import RuleLab
 
 RULE = """rules:

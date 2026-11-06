@@ -8,12 +8,18 @@ rules:
       - pattern-either:
           - pattern: authorization
           - pattern: Authorization
+          - pattern: 'authorization: $VALUE'
+          - pattern: 'Authorization: $VALUE'
           - pattern: $REQ.headers.authorization
           - pattern: $REQ.headers.Authorization
           - pattern: $REQ.headers['authorization']
           - pattern: '$REQ.headers["authorization"]'
           - pattern: $REQ.headers['Authorization']
           - pattern: '$REQ.headers["Authorization"]'
+          - pattern: $REQ.headers.get('authorization')
+          - pattern: '$REQ.headers.get("authorization")'
+          - pattern: $REQ.headers.get('Authorization')
+          - pattern: '$REQ.headers.get("Authorization")'
           - pattern: accessToken
           - pattern: access_token
           - pattern: idToken
@@ -33,12 +39,18 @@ rules:
       - pattern-either:
           - pattern: authorization
           - pattern: Authorization
+          - pattern: 'authorization: $VALUE'
+          - pattern: 'Authorization: $VALUE'
           - pattern: $REQ.headers.authorization
           - pattern: $REQ.headers.Authorization
           - pattern: $REQ.headers['authorization']
           - pattern: '$REQ.headers["authorization"]'
           - pattern: $REQ.headers['Authorization']
           - pattern: '$REQ.headers["Authorization"]'
+          - pattern: $REQ.headers.get('authorization')
+          - pattern: '$REQ.headers.get("authorization")'
+          - pattern: $REQ.headers.get('Authorization')
+          - pattern: '$REQ.headers.get("Authorization")'
           - pattern: accessToken
           - pattern: access_token
           - pattern: idToken

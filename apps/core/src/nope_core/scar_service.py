@@ -2,14 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
-
-from nope_core.config import settings
-from nope_core.db import AuditEvent, ExceptionRecord, RuleVersion, RuleVersion as RuleVersionModel, Scar, ValidationRun, new_id
+from nope_core.db import AuditEvent, ExceptionRecord, RuleVersion, Scar, ValidationRun, new_id
+from nope_core.db import RuleVersion as RuleVersionModel
 from nope_core.rule_lab import CandidateResult
 from nope_core.schemas import (
     ChallengeRequest,
@@ -17,6 +14,8 @@ from nope_core.schemas import (
     ScarResponse,
     ScarStatus,
 )
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 
 def scar_response(scar: Scar) -> ScarResponse:
@@ -135,7 +134,7 @@ def activate_scar(db: Session, scar: Scar, actor: str) -> Scar:
 
 
 def challenge_scar(db: Session, scar: Scar, actor: str, payload: ChallengeRequest) -> ExceptionRecord:
-    expires = datetime.now(timezone.utc) + timedelta(days=payload.expires_in_days)
+    expires = datetime.now(UTC) + timedelta(days=payload.expires_in_days)
     record = ExceptionRecord(
         id=new_id("exc"),
         scar_id=scar.id,

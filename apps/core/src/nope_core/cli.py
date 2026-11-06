@@ -7,7 +7,6 @@ from pathlib import Path
 
 import httpx
 
-
 BASE_URL = os.getenv("NOPE_BASE_URL", "http://localhost:8010")
 DEFAULT_KEY = os.getenv("NOPE_AGENT_KEY", "agent-change-me")
 APPROVER_KEY = os.getenv("NOPE_APPROVER_KEY", "approver-change-me")
@@ -85,6 +84,17 @@ def main() -> None:
     ci.add_argument("--scar-number", type=int, required=True)
     ci.add_argument("--check-url", required=True)
 
+    report = sub.add_parser("report", help="Process and report Semgrep scan results")
+    report.add_argument("scan_json", type=Path, help="Semgrep JSON results file")
+    report.add_argument("--base-url", default=None, help="Base URL of nope-core service")
+    report.add_argument("--ci-key", default=None, help="CI API key for nope-core")
+    report.add_argument(
+        "--fail-closed",
+        action="store_true",
+        default=os.getenv("NOPE_FAIL_CLOSED", "true").lower() == "true",
+        help="Fail build on rule violations even if nope-core API is unreachable",
+    )
+
     args = parser.parse_args()
     if args.command == "health":
         with client(None) as session:
@@ -132,6 +142,15 @@ def main() -> None:
                 "scar_number": args.scar_number,
                 "check_url": args.check_url,
             }))
+    elif args.command == "report":
+        from nope_core.reporter import process_scan_file
+        code = process_scan_file(
+            scan_json_path=args.scan_json,
+            base_url=args.base_url,
+            ci_key=args.ci_key,
+            fail_closed=args.fail_closed,
+        )
+        raise SystemExit(code)
 
 if __name__ == "__main__":
     main()

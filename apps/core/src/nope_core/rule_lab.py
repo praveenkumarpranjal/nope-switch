@@ -3,12 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shlex
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -148,7 +148,7 @@ class RuleLab:
         return written
 
     @staticmethod
-    def _error_message(error: dict) -> str:
+    def _error_message(error: dict[str, Any]) -> str:
         detail = (
             error.get("long_msg")
             or error.get("short_msg")

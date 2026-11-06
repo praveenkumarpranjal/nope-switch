@@ -24,12 +24,14 @@ dev = [
   "pytest-asyncio>=1.1",
   "ruff>=0.12",
   "mypy>=1.17",
+  "types-PyYAML>=6.0",
 ]
 semgrep = ["semgrep>=1.131"]
 
 [project.scripts]
 nope = "nope_core.cli:main"
 nope-demo = "nope_core.demo:main"
+nope-report = "nope_core.reporter:main"
 
 [build-system]
 requires = ["hatchling"]
