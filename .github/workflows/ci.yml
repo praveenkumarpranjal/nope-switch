@@ -18,6 +18,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Enforce branch protection (No direct pushes to main)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor != 'praveenkumarpranjal'
+        run: |
+          echo "::error title=Direct Push Forbidden::Direct push to 'main' by '${{ github.actor }}' is prohibited. All changes must be submitted via a feature branch (e.g. 'feature/...', 'scar/...') and merged through a reviewed Pull Request."
+          exit 1
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
