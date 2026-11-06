@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
 import httpx
 
@@ -88,6 +89,7 @@ def report_failure_to_api(
     sha: str,
     scar_number: int,
     check_url: str,
+    revision_id: str | None = None,
 ) -> dict[str, Any] | None:
     headers = {"X-NOPE-Key": ci_key}
     payload = {
@@ -95,6 +97,7 @@ def report_failure_to_api(
         "sha": sha,
         "scar_number": scar_number,
         "check_url": check_url,
+        "revision_id": revision_id,
     }
     try:
         with httpx.Client(base_url=base_url, timeout=10.0, headers=headers) as client:
@@ -142,6 +145,10 @@ def write_github_step_summary(
             "",
             "#### Required Remediation",
             f"{fix}",
+            "",
+            " | ".join(f"[{label}]({data[key]})" for key, label in
+                       (("approved_rule", "Approved rule"), ("tests", "Tests and replay"), ("history", "Decision history"))
+                       if data.get(key)),
             "",
             "| File | Location | Rule |",
             "|---|---|---|",
@@ -259,6 +266,7 @@ def process_scan_file(
                 "why": extra.get("message", "Violation of Never-Again invariant."),
                 "fix": metadata.get("remediation", "Update code to comply with the policy."),
                 "incident": metadata.get("incident", "Historical incident"),
+                **{key: metadata.get(key) for key in ("revision_id", "approved_rule", "tests", "history")},
             }
 
     # Query API or use fallback for each Scar
@@ -266,12 +274,20 @@ def process_scan_file(
     api_connected = False
 
     for scar_num in findings_by_scar:
-        api_result = report_failure_to_api(resolved_base_url, resolved_ci_key, repo, sha, scar_num, check_url)
+        api_result = report_failure_to_api(resolved_base_url, resolved_ci_key, repo, sha, scar_num, check_url,
+                                           fallback_metadata[scar_num].get("revision_id"))
         if api_result:
             scar_data[scar_num] = api_result
             api_connected = True
         else:
             scar_data[scar_num] = fallback_metadata[scar_num]
+        for key in ("incident", "approved_rule", "tests", "history"):
+            value = scar_data[scar_num].get(key)
+            if isinstance(value, str) and value.startswith("/"):
+                scar_data[scar_num][key] = urljoin(resolved_base_url, value)
+            elif isinstance(value, str) and "/" in value and not value.startswith(("http://", "https://")):
+                server = os.getenv("GITHUB_SERVER_URL", "https://github.com")
+                scar_data[scar_num][key] = f"{server}/{repo}/blob/{sha}/{value}"
 
     # Console Output Banner
     print("\n" + "=" * 80)
@@ -289,6 +305,9 @@ def process_scan_file(
         print(f"Incident:    {incident}")
         print(f"Why:         {why}")
         print(f"Remediation: {fix}")
+        for key, label in (("approved_rule", "Approved rule"), ("tests", "Tests and replay"), ("history", "Decision history")):
+            if data.get(key):
+                print(f"{label}: {data[key]}")
         print(f"\nViolations ({len(items)}):")
         for finding in items:
             path = finding.get("path", "unknown")

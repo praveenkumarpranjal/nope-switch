@@ -3,60 +3,45 @@ rules:
     message: Never log credentials or tokens; store an opaque identifier or redact first.
     severity: ERROR
     languages: [typescript, javascript]
-    patterns:
-      - pattern-inside: logger.$METHOD(...)
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern: '{ $KEY: $VALUE, ... }'
+          - metavariable-regex:
+              metavariable: $KEY
+              regex: (?i)^['"]?(authorization|x-api-key|x-access-token|access_?token|id_?token|api_?key)['"]?$
+          - focus-metavariable: $VALUE
+      - patterns:
+          - pattern: $OBJECT.$KEY
+          - metavariable-regex:
+              metavariable: $KEY
+              regex: (?i)^(authorization|access_?token|id_?token|api_?key)$
+      - patterns:
+          - pattern-either:
+              - pattern: $OBJECT[$KEY]
+              - pattern: $OBJECT.get($KEY)
+          - metavariable-regex:
+              metavariable: $KEY
+              regex: (?i)^['"]?(authorization|x-api-key|x-access-token|access_?token|id_?token|api_?key)['"]?$
       - pattern-either:
           - pattern: authorization
           - pattern: Authorization
-          - pattern: 'authorization: $VALUE'
-          - pattern: 'Authorization: $VALUE'
-          - pattern: $REQ.headers.authorization
-          - pattern: $REQ.headers.Authorization
-          - pattern: $REQ.headers['authorization']
-          - pattern: '$REQ.headers["authorization"]'
-          - pattern: $REQ.headers['Authorization']
-          - pattern: '$REQ.headers["Authorization"]'
-          - pattern: $REQ.headers.get('authorization')
-          - pattern: '$REQ.headers.get("authorization")'
-          - pattern: $REQ.headers.get('Authorization')
-          - pattern: '$REQ.headers.get("Authorization")'
           - pattern: accessToken
           - pattern: access_token
           - pattern: idToken
-          - pattern: x-access-token
-          - pattern: x-api-key
-    metadata:
-      scar: SCAR-001
-      incident: INC-014
-      remediation: Remove the credential material; log an actor or request correlation ID instead.
-
-  - id: nope.credentials-in-logs.console
-    message: Never log credentials or tokens; store an opaque identifier or redact first.
-    severity: ERROR
-    languages: [typescript, javascript]
-    patterns:
-      - pattern-inside: console.$METHOD(...)
+          - pattern: apiKey
+          - pattern: api_key
+    pattern-sanitizers:
+      - pattern: "'[REDACTED]'"
+    pattern-sinks:
       - pattern-either:
-          - pattern: authorization
-          - pattern: Authorization
-          - pattern: 'authorization: $VALUE'
-          - pattern: 'Authorization: $VALUE'
-          - pattern: $REQ.headers.authorization
-          - pattern: $REQ.headers.Authorization
-          - pattern: $REQ.headers['authorization']
-          - pattern: '$REQ.headers["authorization"]'
-          - pattern: $REQ.headers['Authorization']
-          - pattern: '$REQ.headers["Authorization"]'
-          - pattern: $REQ.headers.get('authorization')
-          - pattern: '$REQ.headers.get("authorization")'
-          - pattern: $REQ.headers.get('Authorization')
-          - pattern: '$REQ.headers.get("Authorization")'
-          - pattern: accessToken
-          - pattern: access_token
-          - pattern: idToken
-          - pattern: x-access-token
-          - pattern: x-api-key
+          - pattern: logger.$METHOD(...)
+          - pattern: console.$METHOD(...)
     metadata:
       scar: SCAR-001
-      incident: INC-014
+      incident: demo-app/fixtures/teach.json
+      origin: INC-014
+      approved_rule: config/.semgrep/nope-active.yml
+      tests: demo-app/fixtures/adversarial-challenge.json
+      history: docs/scar-assurance.md
       remediation: Remove the credential material; log an actor or request correlation ID instead.

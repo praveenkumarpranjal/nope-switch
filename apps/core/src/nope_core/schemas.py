@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, Field, HttpUrl, field_validator
+from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 
 class Severity(StrEnum):
@@ -61,6 +61,32 @@ class ValidateScarRequest(BaseModel):
     bad_examples: list[ScarExample] = Field(min_length=1, max_length=20)
     good_examples: list[ScarExample] = Field(max_length=20)
     target_path: str | None = Field(default=None, max_length=2000)
+    original: ScarExample
+    corrected: ScarExample
+
+    @model_validator(mode="after")
+    def unique_names(self) -> ValidateScarRequest:
+        for examples in (self.bad_examples, self.good_examples):
+            if len({e.name for e in examples}) != len(examples):
+                raise ValueError("Fixture names must be unique within each suite")
+        if self.original.content.strip() == self.corrected.content.strip():
+            raise ValueError("Original and corrected incident code must differ")
+        return self
+
+
+class AdversarialRequest(BaseModel):
+    generated_by: str = Field(min_length=2, max_length=200)
+    bad_examples: list[ScarExample] = Field(min_length=1, max_length=20)
+    good_examples: list[ScarExample] = Field(min_length=1, max_length=20)
+
+    @model_validator(mode="after")
+    def independent_examples(self) -> AdversarialRequest:
+        examples = self.bad_examples + self.good_examples
+        if len({e.name for e in examples}) != len(examples):
+            raise ValueError("Adversarial fixture names must be unique")
+        if len({e.content.strip() for e in examples}) != len(examples):
+            raise ValueError("Adversarial fixtures must have distinct contents")
+        return self
 
 
 class ApprovalRequest(BaseModel):

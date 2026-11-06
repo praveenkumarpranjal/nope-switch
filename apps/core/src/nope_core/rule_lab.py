@@ -123,6 +123,11 @@ class RuleLab:
                 detail = (completed.stderr or completed.stdout).strip()[:800]
                 return CandidateResult(False, {}, {}, [], [f"semgrep returned invalid JSON: {detail}"])
 
+            if completed.returncode not in (0, 1):
+                return CandidateResult(False, {}, {}, [], [f"semgrep exited with status {completed.returncode}"])
+            if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+                return CandidateResult(False, {}, {}, [], ["semgrep returned an incomplete scan report"])
+
             hits_by_path: dict[str, int] = {}
             for finding in payload.get("results", []):
                 location = finding.get("path")
@@ -134,6 +139,13 @@ class RuleLab:
             target_hits = self._target_hits(hits_by_path, checked_target)
             errors = payload.get("errors", [])
             error_messages = [self._error_message(error) for error in errors if isinstance(error, dict)][:20]
+            scanned_paths = {os.path.normcase(str(Path(path).resolve()))
+                             for path in payload.get("paths", {}).get("scanned", []) if isinstance(path, str)}
+            skipped = [name for name, path in {**{f"bad/{k}": v for k, v in bad_paths.items()},
+                                               **{f"good/{k}": v for k, v in good_paths.items()}}.items()
+                       if os.path.normcase(str(path)) not in scanned_paths]
+            if skipped:
+                error_messages.append(f"Fixture coverage incomplete; not scanned: {', '.join(skipped)}")
 
             bad_ok = all(hits >= min_bad_fixture_hits for hits in bad_hits.values())
             good_ok = all(hits <= max_good_fixture_hits for hits in good_hits.values())
@@ -141,8 +153,8 @@ class RuleLab:
 
     def _write_examples(self, directory: Path, examples: list[tuple[str, str]]) -> dict[str, Path]:
         written: dict[str, Path] = {}
-        for name, content in examples:
-            path = directory / f"{Path(name).stem}{self._example_extension(name)}"
+        for index, (name, content) in enumerate(examples):
+            path = directory / f"{index}-{Path(name).stem}{self._example_extension(name)}"
             path.write_text(content, encoding="utf-8")
             written[name] = path.resolve()
         return written

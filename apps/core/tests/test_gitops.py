@@ -163,10 +163,20 @@ def _create_approved_scar(client: TestClient) -> dict[str, Any]:
             "rule_yaml": rule_yaml,
             "bad_examples": [{"name": "bad.ts", "content": "db.raw('SELECT ' + id);"}],
             "good_examples": [{"name": "good.ts", "content": "db.query('SELECT ?', [id]);"}],
+            "original": {"name": "original.ts", "content": "db.raw('SELECT ' + id);"},
+            "corrected": {"name": "corrected.ts", "content": "db.query('SELECT ?', [id]);"},
         },
     )
     assert val_resp.status_code == 200
     assert val_resp.json()["passed"] is True
+
+    challenge = client.post(f"/v1/scars/{scar_id}/adversarial", headers={"X-NOPE-Key": "admin"}, json={
+        "generated_by": "independent-test-agent",
+        "bad_examples": [{"name": f"variant-{i}.ts", "content": f"db.raw('SELECT {i}' + account);"} for i in range(6)],
+        "good_examples": [{"name": f"safe-{i}.ts", "content": f"db.query('SELECT {i} WHERE id = ?', [account]);"} for i in range(4)],
+    })
+    assert challenge.status_code == 200, challenge.text
+    assert challenge.json()["passed"] is True
 
     appr_resp = client.post(
         f"/v1/scars/{scar_id}/approve",

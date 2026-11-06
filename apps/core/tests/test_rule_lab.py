@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import json
+import subprocess
+from pathlib import Path
+from typing import Any
+
+import pytest
 from nope_core.rule_lab import RuleLab
 
 RULE = """rules:
@@ -33,3 +39,18 @@ def test_rule_lab_accepts_target_rule() -> None:
     assert result.bad_hits["bad"] >= 1
     assert result.good_hits["good"] == 0
     assert result.passed
+
+
+def test_skipped_safe_fixture_is_not_evidence_of_a_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    def scan(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        bad_path = next(Path(command[-2]).glob("*.ts"))
+        # Simulate a rule's path exclusions hiding the safe fixture from Semgrep.
+        payload = {"results": [{"path": str(bad_path)}], "errors": [], "paths": {"scanned": [str(bad_path)]}}
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+    monkeypatch.setattr("nope_core.rule_lab.shutil.which", lambda _: "semgrep")
+    monkeypatch.setattr("nope_core.rule_lab.subprocess.run", scan)
+    result = RuleLab().validate(RULE, [("bad.ts", BAD)], [("good.ts", GOOD)])
+    assert result.bad_hits["bad.ts"] == 1
+    assert result.good_hits["good.ts"] == 0
+    assert result.passed is False
+    assert "not scanned: good/good.ts" in result.rule_errors[0]

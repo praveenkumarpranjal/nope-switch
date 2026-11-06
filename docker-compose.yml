@@ -19,7 +19,7 @@ services:
       - "8010:8010"
     environment:
       DATABASE_URL: postgresql+psycopg://nope:${NOPE_DB_PASSWORD:-nope-local-only-change-me}@postgres:5432/nope
-      NOPE_API_KEYS: ${NOPE_API_KEYS:-admin-change-me:admin,approver-change-me:approver,agent-change-me:agent,ci-change-me:ci}
+      NOPE_API_KEYS: ${NOPE_API_KEYS:-admin-change-me:admin,approver-change-me:approver,agent-change-me:agent,challenger-change-me:agent,ci-change-me:ci}
       NOPE_ENV: production
       NOPE_SCAN_ROOT: /workspace
     volumes:

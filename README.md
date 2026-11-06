@@ -42,6 +42,7 @@ uv run pytest
 uv run nope-demo reset
 uv run nope-demo teach
 uv run nope-demo validate
+uv run nope-demo adversarial
 uv run nope-demo approve 1
 uv run nope-demo activate 1
 ```
@@ -66,6 +67,7 @@ When you approve, it opens a PR containing the rule, fixtures and provenance. Th
 uv run nope-demo reset
 uv run nope-demo teach
 uv run nope-demo validate
+uv run nope-demo adversarial
 uv run nope-demo approve 1
 uv run nope-demo activate 1
 uv run nope-demo scan-bad
@@ -79,6 +81,7 @@ uv run nope-demo scan-bad
 uv run nope-demo reset
 uv run nope-demo teach
 uv run nope-demo validate
+uv run nope-demo adversarial
 uv run nope-demo approve 1
 uv run nope-demo activate 1
 uv run nope-demo scan-good
@@ -88,6 +91,12 @@ uv run nope-demo scan-bad
 The offline script uses the checked-in bad fixture, so no external model or chat is needed to see the full enforce/fail path. The Docker/Postgres path is in `docker-compose.yml`; replace all demo keys for any shared deployment.
 
 ## Architecture
+
+Scars now require [counterfactual replay, an independent adversarial challenge,
+and preserved provenance with regression gates](docs/scar-assurance.md). Approval
+requires detection of the original incident, a passing correction, at least six
+independent unsafe variants and four safe controls, 100% detection, and zero false
+positives. Replacement rules must also pass every previously approved test suite.
 
 ```text
 Slack / Discord / Teams / Telegram / Mattermost

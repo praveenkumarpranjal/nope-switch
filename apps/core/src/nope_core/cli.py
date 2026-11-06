@@ -127,6 +127,20 @@ def main() -> None:
     validate.add_argument("--bad", nargs="+", required=True, metavar="NAME=PATH")
     validate.add_argument("--good", nargs="*", default=[], metavar="NAME=PATH")
     validate.add_argument("--target", type=Path, default=None)
+    validate.add_argument("--original", type=Path, required=True, help="Original incident's vulnerable code")
+    validate.add_argument("--corrected", type=Path, required=True, help="Corrected incident code")
+
+    adversarial = sub.add_parser("adversarial", help="Submit a separate agent's independent challenge")
+    adversarial.add_argument("scar")
+    adversarial.add_argument("--data", type=Path, required=True)
+
+    provenance = sub.add_parser("provenance", help="Show incident, revisions, evidence and decisions")
+    provenance.add_argument("scar")
+
+    reject = sub.add_parser("reject", help="Reject a pending revision with a recorded decision")
+    reject.add_argument("scar")
+    reject.add_argument("--approver", required=True)
+    reject.add_argument("--reason", required=True)
 
     approve = sub.add_parser("approve")
     approve.add_argument("scar")
@@ -151,6 +165,7 @@ def main() -> None:
     ci.add_argument("--sha", required=True)
     ci.add_argument("--scar-number", type=int, required=True)
     ci.add_argument("--check-url", required=True)
+    ci.add_argument("--revision-id", help="Revision ID embedded in the scanned rule")
 
     report = sub.add_parser("report", help="Process and report Semgrep scan results")
     report.add_argument("scan_json", type=Path, help="Semgrep JSON results file")
@@ -192,9 +207,20 @@ def main() -> None:
             "bad_examples": parse_examples(args.bad),
             "good_examples": parse_examples(args.good),
             "target_path": str(args.target) if args.target else None,
+            "original": {"name": args.original.name, "content": read_structured_file(args.original)},
+            "corrected": {"name": args.corrected.name, "content": read_structured_file(args.corrected)},
         }
         with client() as session:
             dump(session.post(f"/v1/scars/{args.scar}/validate", json=payload))
+    elif args.command == "adversarial":
+        with client() as session:
+            dump(session.post(f"/v1/scars/{args.scar}/adversarial", json=json.loads(read_structured_file(args.data))))
+    elif args.command == "provenance":
+        with client() as session:
+            dump(session.get(f"/v1/scars/{args.scar}/provenance"))
+    elif args.command == "reject":
+        with client(APPROVER_KEY) as session:
+            dump(session.post(f"/v1/scars/{args.scar}/reject", json={"approver": args.approver, "reason": args.reason}))
     elif args.command == "approve":
         with client(APPROVER_KEY) as session:
             dump(session.post(f"/v1/scars/{args.scar}/approve", json={"approver": args.approver, "reason": args.reason}))
@@ -222,6 +248,7 @@ def main() -> None:
                 "sha": args.sha,
                 "scar_number": args.scar_number,
                 "check_url": args.check_url,
+                "revision_id": args.revision_id,
             }))
     elif args.command == "report":
         from nope_core.reporter import process_scan_file

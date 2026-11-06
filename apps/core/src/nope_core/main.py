@@ -11,12 +11,21 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
-from nope_core import scar_service
+from nope_core import assurance, scar_service
 from nope_core.auth import AdminRequired, AgentRequired, ApproverRequired, CiRequired
 from nope_core.config import settings
-from nope_core.db import AuditEvent, Scar, SessionLocal, WebhookDelivery, init_db, new_id
+from nope_core.db import (
+    AuditEvent,
+    RuleVersion,
+    Scar,
+    SessionLocal,
+    WebhookDelivery,
+    init_db,
+    new_id,
+)
 from nope_core.rule_lab import RuleLab, RuleLabError
 from nope_core.schemas import (
+    AdversarialRequest,
     ApprovalRequest,
     BreakGlassActivationRequest,
     ChallengeRequest,
@@ -84,29 +93,104 @@ def validate_scar(scar_id_or_number: str, payload: ValidateScarRequest, actor: A
         if not scar:
             raise HTTPException(status_code=404, detail="Scar not found")
         try:
-            result = lab.validate(
-                payload.rule_yaml,
-                [(example.name, example.content) for example in payload.bad_examples],
-                [(example.name, example.content) for example in payload.good_examples],
-                payload.target_path,
-                settings.min_bad_fixture_hits,
-                settings.max_good_fixture_hits,
-            )
+            rule = scar_service.add_rule_version(db, scar, payload.rule_yaml)
+            db.flush()
+            revision = assurance.build_revision(db, scar, rule, actor, {
+                "original": payload.original.model_dump(), "corrected": payload.corrected.model_dump(),
+                "bad": [e.model_dump() for e in payload.bad_examples],
+                "good": [e.model_dump() for e in payload.good_examples], "target_path": payload.target_path,
+            }, lab)
         except RuleLabError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        scar_service.add_rule_version(db, scar, payload.rule_yaml)
-        scar_service.record_validation(db, scar, actor, result)
+        report = json.loads(revision.report)
+        scar.status = "validated" if revision.state == "validated" else "proposed"
+        scar.approved_by = None
+        scar.approved_reason = None
+        scar_service._audit(db, actor, "scar.validation_passed" if revision.state == "validated" else "scar.validation_failed",
+                            {"revision_id": revision.id, "rule_id": rule.id, **report}, scar.id)
         db.commit()
         return {
-            "passed": result.passed,
-            "bad_findings": result.bad_hits,
-            "good_findings": result.good_hits,
-            "target_findings": result.target_hits,
-            "rule_errors": result.rule_errors,
+            "passed": revision.state == "validated",
+            "revision_id": revision.id,
+            "replay": report["replay"], "regression": report["regression"],
+            "quality_threshold": report["quality_threshold"],
+            "bad_findings": report["candidate"]["bad_hits"],
+            "good_findings": report["candidate"]["good_hits"],
+            "target_findings": report["candidate"]["target_hits"],
+            "rule_errors": report["candidate"]["rule_errors"],
             "total_bad_examples": len(payload.bad_examples),
             "total_good_examples": len(payload.good_examples),
             "scar": scar_service.scar_response(scar).model_dump(mode="json"),
         }
+
+
+@app.post("/v1/scars/{scar_id_or_number}/adversarial")
+def adversarial_scar(scar_id_or_number: str, payload: AdversarialRequest, actor: AgentRequired) -> dict[str, Any]:
+    with SessionLocal() as db:
+        scar = _load_scar(db, scar_id_or_number)
+        if scar is None:
+            raise HTTPException(404, "Scar not found")
+        revision = assurance.latest(db, scar)
+        if revision is None:
+            raise HTTPException(409, "Validate a rule revision first")
+        try:
+            metrics = assurance.adversarial(db, revision, actor, payload.model_dump(), lab)
+        except (ValueError, RuleLabError) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        scar_service._audit(db, actor, "scar.adversarial_completed", {"revision_id": revision.id, **metrics}, scar.id)
+        db.commit()
+        return {"revision_id": revision.id, **metrics}
+
+
+@app.post("/v1/scars/{scar_id_or_number}/reject")
+def reject_scar(scar_id_or_number: str, payload: ApprovalRequest, actor: ApproverRequired) -> dict[str, Any]:
+    with SessionLocal() as db:
+        scar = _load_scar(db, scar_id_or_number)
+        if scar is None:
+            raise HTTPException(404, "Scar not found")
+        revision = assurance.latest(db, scar)
+        if revision is None or revision.state not in {"draft", "validated"}:
+            raise HTTPException(409, "Only a pending revision can be rejected")
+        revision.state = "rejected"
+        scar.status = "active" if scar.active else "proposed"
+        scar_service._audit(db, actor, "scar.rejected", {"revision_id": revision.id, **payload.model_dump()}, scar.id)
+        db.commit()
+        return {"revision_id": revision.id, "state": revision.state}
+
+
+@app.get("/v1/scars/{scar_id_or_number}/provenance")
+def scar_provenance(scar_id_or_number: str, _: CiRequired) -> dict[str, Any]:
+    with SessionLocal() as db:
+        scar = _load_scar(db, scar_id_or_number)
+        if scar is None:
+            raise HTTPException(404, "Scar not found")
+        revisions = db.scalars(select(assurance.Revision).where(assurance.Revision.scar_id == scar.id)
+                              .order_by(assurance.Revision.sequence)).all()
+        events = db.scalars(select(AuditEvent).where(AuditEvent.scar_id == scar.id)
+                           .order_by(AuditEvent.occurred_at, AuditEvent.id)).all()
+        return {"scar": scar_service.scar_response(scar).model_dump(mode="json"),
+                "revisions": [{"id": r.id, "sequence": r.sequence, "rule_id": r.rule_id,
+                               "state": r.state, "author": r.author, "adversary": r.adversary,
+                               "report": json.loads(r.report), "challenge": json.loads(r.challenge) if r.challenge else None}
+                              for r in revisions],
+                "decisions": [{"id": e.id, "actor": e.actor, "action": e.action,
+                               "occurred_at": e.occurred_at.isoformat(), "detail": json.loads(e.detail)} for e in events]}
+
+
+@app.get("/v1/scars/{scar_id_or_number}/revisions/{revision_id}/{artifact}")
+def revision_artifact(scar_id_or_number: str, revision_id: str, artifact: str, _: CiRequired) -> Any:
+    with SessionLocal() as db:
+        scar = _load_scar(db, scar_id_or_number)
+        revision = db.get(assurance.Revision, revision_id)
+        if scar is None or revision is None or revision.scar_id != scar.id:
+            raise HTTPException(404, "Revision not found")
+        if artifact == "tests":
+            return {"fixtures": json.loads(revision.fixtures), "report": json.loads(revision.report),
+                    "challenge": json.loads(revision.challenge) if revision.challenge else None}
+        rule = db.get(RuleVersion, revision.rule_id)
+        if artifact == "rule" and rule:
+            return {"rule_id": rule.id, "sha256": rule.sha256, "rule_yaml": rule.rule_yaml}
+        raise HTTPException(404, "Artifact not found")
 
 
 @app.post("/v1/scars/{scar_id_or_number}/approve")
@@ -153,30 +237,29 @@ def challenge_scar(scar_id_or_number: str, payload: ChallengeRequest, actor: Age
         scar = _load_scar(db, scar_id_or_number)
         if not scar:
             raise HTTPException(status_code=404, detail="Scar not found")
-        validation = None
+        replacement = None
         if payload.proposed_rule_yaml:
-            try:
-                validation = lab.validate(
-                    payload.proposed_rule_yaml,
-                    [(example.name, example.content) for example in payload.bad_examples],
-                    [(example.name, example.content) for example in payload.good_examples],
-                    None,
-                    settings.min_bad_fixture_hits,
-                    settings.max_good_fixture_hits,
-                )
-            except RuleLabError as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
-            scar_service.add_rule_version(db, scar, payload.proposed_rule_yaml)
+            previous = assurance.active(db, scar)
+            if previous is None:
+                raise HTTPException(409, "A replacement requires an active revision with preserved incident tests")
+            suite = json.loads(previous.fixtures)
+            replacement = ValidateScarRequest(rule_yaml=payload.proposed_rule_yaml,
+                original=suite["original"], corrected=suite["corrected"],
+                bad_examples=payload.bad_examples or suite["bad"], good_examples=payload.good_examples or suite["good"])
         record = scar_service.challenge_scar(db, scar, actor, payload)
-        if validation:
-            scar_service.record_validation(db, scar, actor, validation)
         db.commit()
-        return {
+        response = {
             "exception_id": record.id,
             "status": record.status,
             "expires_at": record.expires_at.isoformat() if record.expires_at else None,
-            "replacement_validation": getattr(validation, "passed", None),
+            "replacement_validation": None,
         }
+    if replacement:
+        validation = validate_scar(scar_id_or_number, replacement, actor)
+        response["replacement_validation"] = validation["passed"]
+        response["revision_id"] = validation["revision_id"]
+        response["regression"] = validation["regression"]
+    return response
 
 
 class CiFailure(BaseModel):
@@ -184,6 +267,7 @@ class CiFailure(BaseModel):
     sha: str = Field(pattern=r"^[0-9a-f]{7,40}$")
     scar_number: int = Field(ge=1)
     check_url: str = Field(min_length=8, max_length=2048)
+    revision_id: str | None = Field(default=None, max_length=64)
 
 
 @app.post("/v1/ci/failure")
@@ -192,12 +276,22 @@ def ci_failure(payload: CiFailure, actor: CiRequired) -> dict[str, Any]:
         scar = scar_service.get_scar_by_number(db, payload.scar_number)
         if not scar:
             raise HTTPException(status_code=404, detail="Scar not found")
+        revision = db.get(assurance.Revision, payload.revision_id) if payload.revision_id else assurance.active(db, scar)
+        if revision is not None and (revision.scar_id != scar.id or revision.state not in {"active", "superseded"}):
+            raise HTTPException(409, "CI failure must reference an activated revision of this Scar")
+        if payload.revision_id and revision is None:
+            raise HTTPException(404, "Revision not found")
+        if revision is None:
+            raise HTTPException(409, "CI provenance requires an activated revision with preserved rule and tests")
+        provenance = f"/v1/scars/{scar.number}/provenance"
+        base = f"/v1/scars/{scar.number}/revisions/{revision.id}" if revision else None
+        detail = {**payload.model_dump(), "revision_id": revision.id if revision else None}
         db.add(AuditEvent(
             id=new_id("ci"),
             scar_id=scar.id,
             actor=actor,
             action="ci.failure_observed",
-            detail=payload.model_dump_json(),
+            detail=json.dumps(detail),
         ))
         db.commit()
         return {
@@ -205,7 +299,12 @@ def ci_failure(payload: CiFailure, actor: CiRequired) -> dict[str, Any]:
             "title": scar.title,
             "why": scar.rationale,
             "fix": scar.remediation,
-            "incident": scar.incident_url,
+            "incident": scar.incident_url or provenance,
+            "origin": scar.origin,
+            "revision_id": revision.id if revision else None,
+            "approved_rule": base + "/rule" if base else None,
+            "tests": base + "/tests" if base else None,
+            "history": provenance,
         }
 
 
@@ -325,7 +424,7 @@ async def github_webhook(request: Request) -> dict[str, Any]:
             db.commit()
             return {"status": "ignored", "reason": f"Scar #{scar_number} not found"}
 
-        if scar.active:
+        if scar.active and scar.status != ScarStatus.APPROVED.value:
             db.commit()
             return {"status": "already_active", "scar_number": scar.number}
 
@@ -352,8 +451,10 @@ async def github_webhook(request: Request) -> dict[str, Any]:
                 "reason": f"Scar #{scar.number} is in status '{scar.status}', must be 'approved' before activation via merge",
             }
 
-        scar.status = ScarStatus.ACTIVE.value
-        scar.active = True
+        try:
+            scar_service.activate_scar(db, scar, f"github:{merged_by}")
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
         db.add(
             AuditEvent(
                 id=new_id("audit"),
@@ -382,7 +483,10 @@ async def github_webhook(request: Request) -> dict[str, Any]:
 @app.get("/v1/rules/active.yaml", response_class=Response, include_in_schema=False)
 def get_active_rules(_: CiRequired) -> Response:
     with SessionLocal() as db:
-        yaml_content = scar_service.generate_active_rules_yaml(db)
+        try:
+            yaml_content = scar_service.generate_active_rules_yaml(db)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
         return Response(content=yaml_content, media_type="application/x-yaml")
 
 

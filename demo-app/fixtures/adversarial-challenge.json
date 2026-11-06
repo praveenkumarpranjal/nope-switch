@@ -1,0 +1,59 @@
+{
+  "generated_by": "independent-adversary",
+  "bad_examples": [
+    {
+      "name": "warn-header-in-neutral-field",
+      "content": "declare const req: any; declare const logger: any;\nlogger.warn({ detail: req.headers.authorization }, 'authentication failed');\n"
+    },
+    {
+      "name": "error-bracket-header",
+      "content": "declare const req: any;\nconsole.error('authentication failed', req.headers['authorization']);\n"
+    },
+    {
+      "name": "uppercase-authorization-header",
+      "content": "declare const req: any; declare const logger: any;\nlogger.error({ detail: req.headers['AUTHORIZATION'] }, 'upstream rejected request');\n"
+    },
+    {
+      "name": "mixed-case-headers-get",
+      "content": "declare const req: any;\nconsole.warn('request credentials', req.headers.get('aUtHoRiZaTiOn'));\n"
+    },
+    {
+      "name": "nested-console-access-token",
+      "content": "declare const session: any;\nconsole.info({ diagnostic: { credential: session.accessToken } });\n"
+    },
+    {
+      "name": "api-key-bracket-in-neutral-field",
+      "content": "declare const req: any; declare const logger: any;\nlogger.info({ detail: req.headers['x-api-key'] }, 'request received');\n"
+    },
+    {
+      "name": "uppercase-api-key-object",
+      "content": "declare const credentials: any;\nconsole.log({ payload: credentials.API_KEY });\n"
+    },
+    {
+      "name": "snake-case-token-object",
+      "content": "declare const session: any;\nconsole.debug({ diagnostics: { access_token: session.access_token } });\n"
+    }
+  ],
+  "good_examples": [
+    {
+      "name": "actor-and-request-id-only",
+      "content": "declare const user: any; declare const req: any; declare const logger: any;\nlogger.info({ actor_id: user.id, request_id: req.id }, 'authentication succeeded');\n"
+    },
+    {
+      "name": "console-literal-redacted-header",
+      "content": "console.warn({ authorization: '[REDACTED]' }, 'authentication failed');\n"
+    },
+    {
+      "name": "console-literal-redacted-token",
+      "content": "console.info({ access_token: '[REDACTED]' }, 'session diagnostics');\n"
+    },
+    {
+      "name": "safe-authorization-decision-flag",
+      "content": "declare const allowed: boolean; declare const logger: any;\nlogger.info({ authorization_granted: allowed }, 'permission decision');\n"
+    },
+    {
+      "name": "ordinary-status-and-error-code",
+      "content": "declare const response: any;\nconsole.error({ status: response.status, code: 'AUTH_FAILED' }, 'request rejected');\n"
+    }
+  ]
+}

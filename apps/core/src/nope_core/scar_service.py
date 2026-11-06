@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import yaml
+from nope_core import assurance
 from nope_core.db import (
     AuditEvent,
     ExceptionRecord,
@@ -52,7 +53,7 @@ def scar_response(scar: Scar) -> ScarResponse:
 
 
 def _audit(db: Session, actor: str, action: str, detail: dict[str, Any], scar_id: str | None = None) -> None:
-    db.add(AuditEvent(id=new_id("evt"), scar_id=scar_id, actor=actor, action=action, detail=json.dumps(detail, default=str, sort_keys=True)))
+    db.add(AuditEvent(id=new_id("evt"), scar_id=scar_id, actor=actor, action=action, occurred_at=datetime.now(UTC), detail=json.dumps(detail, default=str, sort_keys=True)))
 
 
 def get_scar(db: Session, scar_id: str) -> Scar | None:
@@ -151,25 +152,43 @@ def record_validation(db: Session, scar: Scar, actor: str, result: CandidateResu
 def approve_scar(db: Session, scar: Scar, actor: str, approver: str, reason: str) -> Scar:
     if scar.status != ScarStatus.VALIDATED.value:
         raise ValueError("Only a validated scar can be approved")
+    revision = assurance.require_quality(assurance.latest(db, scar))
+    revision.state = "approved"
     scar.status = ScarStatus.APPROVED.value
     scar.approved_by = approver
     scar.approved_reason = reason
-    _audit(db, actor, "scar.approved", {"approver": approver, "reason": reason}, scar.id)
+    _audit(db, actor, "scar.approved", {"approver": approver, "reason": reason, "revision_id": revision.id, "rule_id": revision.rule_id}, scar.id)
     return scar
 
 
 def activate_scar(db: Session, scar: Scar, actor: str) -> Scar:
     if scar.status != ScarStatus.APPROVED.value:
         raise ValueError("Only an approved scar can be activated")
+    revision = assurance.latest(db, scar)
+    if revision is None or revision.state != "approved":
+        raise ValueError("The latest revision must be approved before activation")
+    previous = assurance.active(db, scar)
+    if previous is not None:
+        previous.state = "superseded"
+    revision.state = "active"
     scar.status = ScarStatus.ACTIVE.value
     scar.active = True
-    _audit(db, actor, "scar.activated", {"approved_by": scar.approved_by}, scar.id)
+    _audit(db, actor, "scar.activated", {"approved_by": scar.approved_by, "revision_id": revision.id}, scar.id)
     return scar
 
 
 def activate_scar_break_glass(db: Session, scar: Scar, actor: str, authorized_by: str, reason: str) -> Scar:
     if scar.status != ScarStatus.APPROVED.value:
         raise ValueError("Only an approved scar can be activated")
+    # Manual activation also requires the exact approved revision. The route's
+    # AdminRequired dependency, mandatory reason, and break-glass audit remain.
+    revision = assurance.latest(db, scar)
+    if revision is None or revision.state != "approved":
+        raise ValueError("The latest revision must be approved before activation")
+    previous = assurance.active(db, scar)
+    if previous is not None:
+        previous.state = "superseded"
+    revision.state = "active"
     scar.status = ScarStatus.ACTIVE.value
     scar.active = True
     _audit(
@@ -180,6 +199,7 @@ def activate_scar_break_glass(db: Session, scar: Scar, actor: str, authorized_by
             "warning": "BREAK-GLASS MANUAL ACTIVATION BYPASSING GITOPS PR MERGE",
             "authorized_by": authorized_by,
             "reason": reason,
+            "revision_id": revision.id,
         },
         scar.id,
     )
@@ -209,12 +229,10 @@ def generate_active_rules_yaml(db: Session) -> str:
     scars = list(db.scalars(select(Scar).where(Scar.active.is_(True)).order_by(Scar.number.asc())).all())
     merged_rules: list[dict[str, Any]] = []
     for scar in scars:
-        latest_rule_version = db.scalar(
-            select(RuleVersionModel)
-            .where(RuleVersionModel.scar_id == scar.id)
-            .order_by(RuleVersionModel.version.desc())
-            .limit(1)
-        )
+        revision = assurance.active(db, scar)
+        if revision is None:
+            raise ValueError(f"SCAR-{scar.number:03d} lacks revision evidence; revalidate, challenge, approve and activate it")
+        latest_rule_version = db.get(RuleVersionModel, revision.rule_id)
         if not latest_rule_version or not latest_rule_version.rule_yaml.strip():
             continue
         try:
@@ -232,8 +250,16 @@ def generate_active_rules_yaml(db: Session) -> str:
             if isinstance(rule, dict):
                 rule_copy = dict(rule)
                 metadata = rule_copy.setdefault("metadata", {})
-                if isinstance(metadata, dict) and "scar" not in metadata:
-                    metadata["scar"] = f"SCAR-{scar.number:03d}"
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                    rule_copy["metadata"] = metadata
+                base = f"/v1/scars/{scar.number}/revisions/{revision.id}"
+                metadata.update({"scar": f"SCAR-{scar.number:03d}",
+                                 "incident": scar.incident_url or f"/v1/scars/{scar.number}/provenance",
+                                 "origin": scar.origin, "rule_sha256": latest_rule_version.sha256,
+                                 "revision_id": revision.id, "approved_rule": base + "/rule",
+                                 "tests": base + "/tests", "history": f"/v1/scars/{scar.number}/provenance",
+                                 "remediation": scar.remediation})
                 merged_rules.append(rule_copy)
     return yaml.safe_dump({"rules": merged_rules}, sort_keys=False)
 

@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 import uvicorn
-from nope_core import scar_service
+from nope_core import assurance, scar_service
 from nope_core.db import AuditEvent, Scar, SessionLocal
 from nope_core.main import app
 from nope_core.reporter import (
@@ -301,6 +301,17 @@ def test_live_server_integration_records_failure_and_returns_remediation(
         )
         db.commit()
         scar_number = scar.number
+        # Seed an activated revision so the HTTP reporter can link exact artifacts.
+        rule = scar_service.add_rule_version(db, scar, "rules: []")
+        db.flush()
+        db.add(assurance.Revision(id="rev_reporter_test", scar_id=scar.id, rule_id=rule.id,
+                                 sequence=rule.version, author="test-author", state="active",
+                                 fixtures=json.dumps({"original": {"name": "original.ts", "content": "danger();"},
+                                                      "corrected": {"name": "safe.ts", "content": "safe();"}}),
+                                 report=json.dumps({"replay": {"passed": True}})))
+        scar.active = True
+        scar.status = "active"
+        db.commit()
 
     # 3. Direct HTTP call over TCP socket to /v1/ci/failure
     api_resp = report_failure_to_api(
@@ -317,6 +328,10 @@ def test_live_server_integration_records_failure_and_returns_remediation(
     assert api_resp["why"] == "Wide monitoring ingestion leaks credentials"
     assert api_resp["fix"] == "Log opaque user ID instead"
     assert api_resp["incident"] == "https://github.com/example/inc-999"
+    assert api_resp["revision_id"] == "rev_reporter_test"
+    assert api_resp["approved_rule"].endswith("/revisions/rev_reporter_test/rule")
+    assert api_resp["tests"].endswith("/revisions/rev_reporter_test/tests")
+    assert api_resp["history"].endswith("/provenance")
 
     # 4. Duplicate retry call on same commit to verify retry idempotency and unique IDs
     retry_resp = report_failure_to_api(
@@ -377,3 +392,25 @@ def test_live_server_integration_records_failure_and_returns_remediation(
     assert f"Scar #{scar_number:03d} — Never log customer credentials" in summary_md
     assert "Log opaque user ID instead" in summary_md
     assert "https://github.com/example/inc-999" in summary_md
+    assert "[Approved rule]" in summary_md
+    assert "[Tests and replay]" in summary_md
+    assert "[Decision history]" in summary_md
+
+
+def test_offline_provenance_links_pin_repository_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_REPOSITORY", "acme/service")
+    monkeypatch.setenv("GITHUB_SHA", "abcdef123")
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    scan = tmp_path / "scan.json"
+    scan.write_text(json.dumps({"results": [{"path": "src/auth.ts", "check_id": "credential-rule",
+        "extra": {"metadata": {"scar": "SCAR-001", "revision_id": "rev_original",
+                                "incident": "demo-app/fixtures/teach.json", "approved_rule": "config/.semgrep/nope-active.yml",
+                                "tests": "demo-app/fixtures/adversarial-challenge.json", "history": "docs/scar-assurance.md"}}}], "errors": []}))
+    with patch("nope_core.reporter.report_failure_to_api", return_value=None) as report:
+        assert process_scan_file(scan) == 1
+        assert report.call_args.args[-1] == "rev_original"
+    content = summary.read_text(encoding="utf-8")
+    for path in ("demo-app/fixtures/teach.json", "config/.semgrep/nope-active.yml",
+                 "demo-app/fixtures/adversarial-challenge.json", "docs/scar-assurance.md"):
+        assert f"https://github.com/acme/service/blob/abcdef123/{path}" in content

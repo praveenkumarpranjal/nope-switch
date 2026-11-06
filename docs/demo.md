@@ -41,12 +41,16 @@ Open `docs/switch-setup.md`. Point out:
 uv run nope-demo reset
 uv run nope-demo teach
 uv run nope-demo validate
+uv run nope-demo adversarial
 uv run nope-demo approve 1
 uv run nope-demo activate 1
 uv run nope-demo scan-good
 ```
 
-Highlight `passed: true`, `bad_hits.bad = 1`, `good_hits.good = 0`, then status `active`.
+Highlight the passing counterfactual replay: original detected and correction clean.
+Then show eight independent detections, zero misses, zero false positives, and
+the human-approved `active` status. The independent fixtures are described in
+[the adversarial agent workflow](adversarial-agent.md).
 
 ## 4. Prove the safeguard blocks the incident again (3:45–4:45)
 

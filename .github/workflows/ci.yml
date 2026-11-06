@@ -38,6 +38,16 @@ jobs:
           uv run mypy apps/core/tests
           uv run pytest
 
+      - name: Counterfactual replay and independent Scar challenge
+        run: uv run python scripts/check_assurance.py
+
+      - name: Preserve Scar test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scar-assurance-report
+          path: .data/assurance-report.json
+
       - name: Target service checks
         run: |
           npm --prefix demo-app ci

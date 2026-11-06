@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import hmac
 import os
 from collections.abc import Awaitable, Callable
@@ -48,7 +49,7 @@ def authorize(minimum: Role) -> Callable[[Annotated[str | None, Header()]], Awai
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing X-NOPE-Key")
         for expected_key, role in API_KEYS.items():
             if hmac.compare_digest(expected_key, x_nope_key) and role >= minimum:
-                return f"api-key:{role.name.lower()}"
+                return f"api-key:{role.name.lower()}:{hashlib.sha256(expected_key.encode()).hexdigest()[:16]}"
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
 
     return dependency

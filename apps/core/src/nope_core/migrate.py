@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+from nope_core import assurance  # noqa: F401 -- register additive revision table
 from nope_core.db import init_db
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
