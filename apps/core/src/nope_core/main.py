@@ -12,7 +12,14 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from nope_core import assurance, scar_service, validation_jobs, validation_pipeline
-from nope_core.auth import AdminRequired, AgentRequired, ApproverRequired, CiRequired
+from nope_core.auth import (
+    AdminRequired,
+    AgentRequired,
+    ApproverRequired,
+    CiRequired,
+    Role,
+    issue_token,
+)
 from nope_core.config import settings
 from nope_core.db import (
     AuditEvent,
@@ -31,7 +38,9 @@ from nope_core.schemas import (
     BreakGlassActivationRequest,
     ChallengeRequest,
     CreateScarRequest,
+    IssueTokenRequest,
     ScarStatus,
+    TokenResponse,
     ValidateScarRequest,
 )
 from pydantic import BaseModel, Field
@@ -55,33 +64,56 @@ def health() -> dict[str, Any]:
 
 
 @app.get("/v1/scars")
-def list_scars(_: AgentRequired) -> list[dict[str, Any]]:
+def list_scars(actor: AgentRequired, repository: str | None = None) -> list[dict[str, Any]]:
     with SessionLocal() as db:
-        return [scar_service.scar_response(scar).model_dump(mode="json") for scar in scar_service.list_scars(db)]
+        return [
+            scar_service.scar_response(scar).model_dump(mode="json")
+            for scar in scar_service.list_scars(db, organization_id=actor.organization, repository=repository)
+        ]
 
 
 @app.post("/v1/scars", status_code=201)
 def create_scar(payload: CreateScarRequest, actor: AgentRequired) -> dict[str, Any]:
     with SessionLocal() as db:
-        scar = scar_service.create_scar(db, payload, actor)
+        if actor.is_user_identity and payload.proposed_by and payload.proposed_by != actor.subject:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Identity impersonation forbidden: authenticated as '{actor.subject}', cannot propose as '{payload.proposed_by}'",
+            )
+        target_org = actor.organization if hasattr(actor, "organization") else "default"
+        if payload.organization_id and payload.organization_id != target_org:
+            if hasattr(actor, "role") and actor.role < Role.ADMIN and target_org != "*":
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Identity forbidden: authenticated in organization '{target_org}', cannot create scar in '{payload.organization_id}'",
+                )
+            target_org = payload.organization_id
+        scar = scar_service.create_scar(db, payload, actor, organization_id=target_org)
         db.commit()
         return scar_service.scar_response(scar).model_dump(mode="json")
 
 
-def _load_scar(db: Session, scar_id_or_number: str) -> Scar | None:
-    scar: Scar | None = db.get(Scar, scar_id_or_number)
-    if scar is not None:
+def _load_scar(db: Session, scar_id_or_number: str, organization_id: str | None = None) -> Scar | None:
+    if scar_id_or_number.startswith("scar-"):
+        scar = db.get(Scar, scar_id_or_number)
+        if scar and organization_id and organization_id != "*" and scar.organization_id != organization_id:
+            return None
         return scar
     if scar_id_or_number.isdigit():
-        scar = db.scalar(select(Scar).where(Scar.number == int(scar_id_or_number)))
-        return scar
-    return None
+        stmt = select(Scar).where(Scar.number == int(scar_id_or_number))
+        if organization_id and organization_id != "*":
+            stmt = stmt.where(Scar.organization_id == organization_id)
+        return db.scalar(stmt)
+    scar = db.get(Scar, scar_id_or_number)
+    if scar and organization_id and organization_id != "*" and scar.organization_id != organization_id:
+        return None
+    return scar
 
 
 @app.get("/v1/scars/{scar_id_or_number}")
-def get_scar(scar_id_or_number: str, _: AgentRequired) -> dict[str, Any]:
+def get_scar(scar_id_or_number: str, actor: AgentRequired) -> dict[str, Any]:
     with SessionLocal() as db:
-        scar = _load_scar(db, scar_id_or_number)
+        scar = _load_scar(db, scar_id_or_number, organization_id=actor.organization)
         if not scar:
             raise HTTPException(status_code=404, detail="Scar not found")
         return scar_service.scar_response(scar).model_dump(mode="json")
@@ -90,7 +122,7 @@ def get_scar(scar_id_or_number: str, _: AgentRequired) -> dict[str, Any]:
 @app.post("/v1/scars/{scar_id_or_number}/validate")
 def validate_scar(scar_id_or_number: str, payload: ValidateScarRequest, actor: AgentRequired, sync: bool = Query(False)) -> Any:
     with SessionLocal() as db:
-        scar = _load_scar(db, scar_id_or_number)
+        scar = _load_scar(db, scar_id_or_number, organization_id=actor.organization)
         if not scar:
             raise HTTPException(status_code=404, detail="Scar not found")
         if sync:
@@ -112,10 +144,10 @@ def validate_scar(scar_id_or_number: str, payload: ValidateScarRequest, actor: A
 
 
 @app.get("/v1/validations/{job_id}")
-def get_validation(job_id: str, _: AgentRequired) -> dict[str, Any]:
+def get_validation(job_id: str, actor: AgentRequired) -> dict[str, Any]:
     with SessionLocal() as db:
         job = db.get(ValidationJob, job_id)
-        if job is None:
+        if job is None or (actor.organization != "*" and job.organization_id != actor.organization):
             raise HTTPException(status_code=404, detail="Validation job not found")
         return validation_jobs.job_response(job)
 
@@ -132,7 +164,7 @@ def _safe_json_loads(data: str | None, default: Any = None) -> Any:
 @app.post("/v1/scars/{scar_id_or_number}/adversarial")
 def adversarial_scar(scar_id_or_number: str, payload: AdversarialRequest, actor: AgentRequired) -> dict[str, Any]:
     with SessionLocal() as db:
-        scar = _load_scar(db, scar_id_or_number)
+        scar = _load_scar(db, scar_id_or_number, organization_id=actor.organization)
         if scar is None:
             raise HTTPException(404, "Scar not found")
         revision = assurance.latest(db, scar)
@@ -146,7 +178,7 @@ def adversarial_scar(scar_id_or_number: str, payload: AdversarialRequest, actor:
             metrics = assurance.adversarial(db, revision, actor, payload.model_dump(), lab)
         except (ValueError, RuleLabError) as exc:
             raise HTTPException(409, str(exc)) from exc
-        scar_service._audit(db, actor, "scar.adversarial_completed", {"revision_id": revision.id, **metrics}, scar.id)
+        scar_service._audit(db, actor, "scar.adversarial_completed", {"revision_id": revision.id, **metrics}, scar.id, organization_id=scar.organization_id)
         db.commit()
         return {"revision_id": revision.id, **metrics}
 
@@ -154,7 +186,7 @@ def adversarial_scar(scar_id_or_number: str, payload: AdversarialRequest, actor:
 @app.post("/v1/scars/{scar_id_or_number}/reject")
 def reject_scar(scar_id_or_number: str, payload: ApprovalRequest, actor: ApproverRequired) -> dict[str, Any]:
     with SessionLocal() as db:
-        scar = _load_scar(db, scar_id_or_number)
+        scar = _load_scar(db, scar_id_or_number, organization_id=actor.organization)
         if scar is None:
             raise HTTPException(404, "Scar not found")
         revision = assurance.latest(db, scar)
@@ -162,15 +194,15 @@ def reject_scar(scar_id_or_number: str, payload: ApprovalRequest, actor: Approve
             raise HTTPException(409, "Only a pending revision can be rejected")
         revision.state = "rejected"
         scar.status = "active" if scar.active else "proposed"
-        scar_service._audit(db, actor, "scar.rejected", {"revision_id": revision.id, **payload.model_dump()}, scar.id)
+        scar_service._audit(db, actor, "scar.rejected", {"revision_id": revision.id, **payload.model_dump()}, scar.id, organization_id=scar.organization_id)
         db.commit()
         return {"revision_id": revision.id, "state": revision.state}
 
 
 @app.get("/v1/scars/{scar_id_or_number}/provenance")
-def scar_provenance(scar_id_or_number: str, _: CiRequired) -> dict[str, Any]:
+def scar_provenance(scar_id_or_number: str, actor: CiRequired) -> dict[str, Any]:
     with SessionLocal() as db:
-        scar = _load_scar(db, scar_id_or_number)
+        scar = _load_scar(db, scar_id_or_number, organization_id=actor.organization)
         if scar is None:
             raise HTTPException(404, "Scar not found")
         revisions = db.scalars(select(assurance.Revision).where(assurance.Revision.scar_id == scar.id)
@@ -187,9 +219,9 @@ def scar_provenance(scar_id_or_number: str, _: CiRequired) -> dict[str, Any]:
 
 
 @app.get("/v1/scars/{scar_id_or_number}/revisions/{revision_id}/{artifact}")
-def revision_artifact(scar_id_or_number: str, revision_id: str, artifact: str, _: CiRequired) -> Any:
+def revision_artifact(scar_id_or_number: str, revision_id: str, artifact: str, actor: CiRequired) -> Any:
     with SessionLocal() as db:
-        scar = _load_scar(db, scar_id_or_number)
+        scar = _load_scar(db, scar_id_or_number, organization_id=actor.organization)
         revision = db.get(assurance.Revision, revision_id)
         if scar is None or revision is None or revision.scar_id != scar.id:
             raise HTTPException(404, "Revision not found")
@@ -205,11 +237,17 @@ def revision_artifact(scar_id_or_number: str, revision_id: str, artifact: str, _
 @app.post("/v1/scars/{scar_id_or_number}/approve")
 def approve_scar(scar_id_or_number: str, payload: ApprovalRequest, actor: ApproverRequired) -> dict[str, Any]:
     with SessionLocal() as db:
-        scar = _load_scar(db, scar_id_or_number)
+        scar = _load_scar(db, scar_id_or_number, organization_id=actor.organization)
         if not scar:
             raise HTTPException(status_code=404, detail="Scar not found")
+        if actor.is_user_identity and payload.approver and payload.approver != actor.subject:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Identity impersonation forbidden: authenticated as '{actor.subject}', cannot approve as '{payload.approver}'",
+            )
+        approver_identity = actor.subject if (actor.is_user_identity or not payload.approver) else payload.approver
         try:
-            scar = scar_service.approve_scar(db, scar, actor, payload.approver, payload.reason)
+            scar = scar_service.approve_scar(db, scar, actor, approver_identity, payload.reason)
             db.commit()
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -227,12 +265,18 @@ def activate_scar(
     Requires Admin permissions and an audited justification.
     """
     with SessionLocal() as db:
-        scar = _load_scar(db, scar_id_or_number)
+        scar = _load_scar(db, scar_id_or_number, organization_id=actor.organization)
         if not scar:
             raise HTTPException(status_code=404, detail="Scar not found")
+        if actor.is_user_identity and payload.authorized_by and payload.authorized_by != actor.subject:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Identity impersonation forbidden: authenticated as '{actor.subject}', cannot activate as '{payload.authorized_by}'",
+            )
+        authorized_by = actor.subject if (actor.is_user_identity or not payload.authorized_by) else payload.authorized_by
         try:
             scar = scar_service.activate_scar_break_glass(
-                db, scar, actor, payload.authorized_by, payload.reason
+                db, scar, actor, authorized_by, payload.reason
             )
             db.commit()
         except ValueError as exc:
@@ -243,7 +287,7 @@ def activate_scar(
 @app.post("/v1/scars/{scar_id_or_number}/challenge", status_code=202)
 def challenge_scar(scar_id_or_number: str, payload: ChallengeRequest, actor: AgentRequired) -> dict[str, Any]:
     with SessionLocal() as db:
-        scar = _load_scar(db, scar_id_or_number)
+        scar = _load_scar(db, scar_id_or_number, organization_id=actor.organization)
         if not scar:
             raise HTTPException(status_code=404, detail="Scar not found")
         replacement = None
@@ -283,7 +327,11 @@ class CiFailure(BaseModel):
 @app.post("/v1/ci/failure")
 def ci_failure(payload: CiFailure, actor: CiRequired) -> dict[str, Any]:
     with SessionLocal() as db:
-        scar = scar_service.get_scar_by_number(db, payload.scar_number)
+        scar = scar_service.get_scar_by_number(
+            db, payload.scar_number, organization_id=actor.organization, repository=payload.repository
+        )
+        if not scar:
+            scar = scar_service.get_scar_by_number(db, payload.scar_number, organization_id=actor.organization)
         if not scar:
             raise HTTPException(status_code=404, detail="Scar not found")
         revision = db.get(assurance.Revision, payload.revision_id) if payload.revision_id else assurance.active(db, scar)
@@ -299,6 +347,7 @@ def ci_failure(payload: CiFailure, actor: CiRequired) -> dict[str, Any]:
         db.add(AuditEvent(
             id=new_id("ci"),
             scar_id=scar.id,
+            organization_id=scar.organization_id,
             actor=actor,
             action="ci.failure_observed",
             detail=json.dumps(detail),
@@ -319,14 +368,18 @@ def ci_failure(payload: CiFailure, actor: CiRequired) -> dict[str, Any]:
 
 
 @app.get("/v1/audit")
-def audit(_: ApproverRequired, limit: int = 100) -> list[dict[str, Any]]:
+def audit(actor: ApproverRequired, limit: int = 100) -> list[dict[str, Any]]:
     limit = max(1, min(limit, 500))
     with SessionLocal() as db:
-        rows = db.scalars(select(AuditEvent).order_by(AuditEvent.occurred_at.desc()).limit(limit)).all()
+        stmt = select(AuditEvent)
+        if actor.organization and actor.organization != "*":
+            stmt = stmt.where(AuditEvent.organization_id == actor.organization)
+        rows = db.scalars(stmt.order_by(AuditEvent.occurred_at.desc()).limit(limit)).all()
         return [
             {
                 "id": row.id,
                 "scar_id": row.scar_id,
+                "organization_id": row.organization_id,
                 "actor": row.actor,
                 "action": row.action,
                 "occurred_at": row.occurred_at.isoformat(),
@@ -334,6 +387,46 @@ def audit(_: ApproverRequired, limit: int = 100) -> list[dict[str, Any]]:
             }
             for row in rows
         ]
+
+
+@app.get("/v1/auth/me")
+def auth_me(actor: CiRequired) -> dict[str, Any]:
+    """Inspect the authenticated caller's identity, role, and organization."""
+    return actor.to_dict()
+
+
+@app.post("/v1/auth/tokens", status_code=201)
+def create_token(payload: IssueTokenRequest, actor: AdminRequired) -> TokenResponse:
+    """Issue a cryptographically signed HMAC-SHA256 bearer token (Admin only)."""
+    from datetime import UTC, datetime, timedelta
+    token = issue_token(
+        subject=payload.subject,
+        role=payload.role,
+        expires_in_seconds=payload.expires_in_seconds,
+        organization=payload.organization,
+    )
+    expires_at = (datetime.now(UTC) + timedelta(seconds=payload.expires_in_seconds)).isoformat()
+    with SessionLocal() as db:
+        scar_service._audit(
+            db,
+            actor,
+            "auth.token_issued",
+            {
+                "subject": payload.subject,
+                "role": payload.role.lower(),
+                "organization": payload.organization,
+                "expires_in_seconds": payload.expires_in_seconds,
+            },
+        )
+        db.commit()
+    return TokenResponse(
+        token=token,
+        token_type="Bearer",
+        subject=payload.subject,
+        role=payload.role.lower(),
+        organization=payload.organization,
+        expires_at=expires_at,
+    )
 
 
 def _verify_github_signature(raw_body: bytes, signature_header: str | None, secret: str) -> bool:
@@ -443,6 +536,7 @@ async def github_webhook(request: Request) -> dict[str, Any]:
                 AuditEvent(
                     id=new_id("audit"),
                     scar_id=scar.id,
+                    organization_id=scar.organization_id,
                     actor=f"github:{merged_by}",
                     action="scar.merge_unapproved_warning",
                     detail=json.dumps({
@@ -469,6 +563,7 @@ async def github_webhook(request: Request) -> dict[str, Any]:
             AuditEvent(
                 id=new_id("audit"),
                 scar_id=scar.id,
+                organization_id=scar.organization_id,
                 actor=f"github:{merged_by}",
                 action="scar.activated_via_merge",
                 detail=json.dumps({
@@ -491,10 +586,12 @@ async def github_webhook(request: Request) -> dict[str, Any]:
 
 @app.get("/v1/rules/active.yml", response_class=Response)
 @app.get("/v1/rules/active.yaml", response_class=Response, include_in_schema=False)
-def get_active_rules(_: CiRequired) -> Response:
+def get_active_rules(actor: CiRequired, repository: str | None = None) -> Response:
     with SessionLocal() as db:
         try:
-            yaml_content = scar_service.generate_active_rules_yaml(db)
+            yaml_content = scar_service.generate_active_rules_yaml(
+                db, organization_id=actor.organization, repository=repository
+            )
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
         return Response(content=yaml_content, media_type="application/x-yaml")

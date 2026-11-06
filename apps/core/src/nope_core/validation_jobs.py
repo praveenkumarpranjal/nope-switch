@@ -22,6 +22,7 @@ def enqueue_validation(db: Session, scar: Scar, payload: ValidateScarRequest, ac
     job = ValidationJob(
         id=new_id("val"),
         scar_id=scar.id,
+        organization_id=scar.organization_id,
         actor=actor,
         status="pending",
         payload=payload.model_dump_json(),

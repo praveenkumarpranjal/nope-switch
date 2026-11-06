@@ -119,6 +119,7 @@ def build_revision(
     revision = Revision(
         id=new_id("rev"),
         scar_id=scar.id,
+        organization_id=scar.organization_id,
         rule_id=rule.id,
         sequence=rule.version,
         author=actor,

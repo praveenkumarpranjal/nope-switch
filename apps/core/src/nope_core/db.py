@@ -11,6 +11,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     create_engine,
     func,
     select,
@@ -38,9 +39,13 @@ class TimestampMixin:
 
 class Scar(Base, TimestampMixin):
     __tablename__ = "scars"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "repository", "number", name="uq_scar_org_repo_number"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    number: Mapped[int] = mapped_column(Integer, unique=True, index=True, nullable=False)
+    number: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    organization_id: Mapped[str] = mapped_column(String(100), index=True, nullable=False, default="default")
     title: Mapped[str] = mapped_column(String(160), nullable=False)
     incident_summary: Mapped[str] = mapped_column(Text, nullable=False)
     invariant: Mapped[str] = mapped_column(Text, nullable=False)
@@ -109,6 +114,7 @@ class AuditEvent(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     scar_id: Mapped[str | None] = mapped_column(ForeignKey("scars.id", ondelete="SET NULL"), index=True, nullable=True)
+    organization_id: Mapped[str] = mapped_column(String(100), index=True, nullable=False, default="default")
     actor: Mapped[str] = mapped_column(String(200), nullable=False)
     action: Mapped[str] = mapped_column(String(80), nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -120,7 +126,7 @@ class AuditEvent(Base):
 class ScarCounter(Base):
     __tablename__ = "scar_counters"
 
-    name: Mapped[str] = mapped_column(String(32), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), primary_key=True)
     current_value: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
@@ -137,6 +143,7 @@ class ValidationJob(Base, TimestampMixin):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     scar_id: Mapped[str] = mapped_column(ForeignKey("scars.id", ondelete="SET NULL"), index=True, nullable=True)
+    organization_id: Mapped[str] = mapped_column(String(100), index=True, nullable=False, default="default")
     actor: Mapped[str] = mapped_column(String(200), nullable=False)
     status: Mapped[str] = mapped_column(String(24), index=True, nullable=False, default="pending")
     payload: Mapped[str] = mapped_column(Text, nullable=False)
@@ -152,6 +159,7 @@ class Revision(Base, TimestampMixin):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     scar_id: Mapped[str] = mapped_column(ForeignKey("scars.id", ondelete="CASCADE"), index=True, nullable=False)
+    organization_id: Mapped[str] = mapped_column(String(100), index=True, nullable=False, default="default")
     rule_id: Mapped[str] = mapped_column(ForeignKey("rule_versions.id"), nullable=False)
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     author: Mapped[str] = mapped_column(String(200), nullable=False)

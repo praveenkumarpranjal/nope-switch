@@ -48,31 +48,49 @@ def scar_response(scar: Scar) -> ScarResponse:
         status=ScarStatus(scar.status),
         active=scar.active,
         approved_by=scar.approved_by,
+        organization_id=scar.organization_id,
         created_at=scar.created_at,
         updated_at=scar.updated_at,
     )
 
 
-def _audit(db: Session, actor: str, action: str, detail: dict[str, Any], scar_id: str | None = None) -> None:
-    db.add(AuditEvent(id=new_id("evt"), scar_id=scar_id, actor=actor, action=action, occurred_at=datetime.now(UTC), detail=json.dumps(detail, default=str, sort_keys=True)))
+def _audit(db: Session, actor: str, action: str, detail: dict[str, Any], scar_id: str | None = None, organization_id: str = "default") -> None:
+    db.add(AuditEvent(id=new_id("evt"), scar_id=scar_id, organization_id=organization_id, actor=actor, action=action, occurred_at=datetime.now(UTC), detail=json.dumps(detail, default=str, sort_keys=True)))
 
 
-def get_scar(db: Session, scar_id: str) -> Scar | None:
+def get_scar(db: Session, scar_id: str, organization_id: str | None = None) -> Scar | None:
+    if organization_id and organization_id != "*":
+        return db.scalar(select(Scar).where(Scar.id == scar_id, Scar.organization_id == organization_id))
     return db.get(Scar, scar_id)
 
 
-def get_scar_by_number(db: Session, number: int) -> Scar | None:
-    return db.scalar(select(Scar).where(Scar.number == number))
+def get_scar_by_number(db: Session, number: int, organization_id: str | None = None, repository: str | None = None) -> Scar | None:
+    stmt = select(Scar).where(Scar.number == number)
+    if organization_id and organization_id != "*":
+        stmt = stmt.where(Scar.organization_id == organization_id)
+    if repository:
+        stmt = stmt.where(Scar.repository == repository)
+    return db.scalar(stmt)
 
 
-def list_scars(db: Session) -> list[Scar]:
-    return list(db.scalars(select(Scar).order_by(Scar.number.desc())).all())
+def list_scars(db: Session, organization_id: str | None = None, repository: str | None = None) -> list[Scar]:
+    stmt = select(Scar)
+    if organization_id and organization_id != "*":
+        stmt = stmt.where(Scar.organization_id == organization_id)
+    if repository:
+        stmt = stmt.where(Scar.repository == repository)
+    return list(db.scalars(stmt.order_by(Scar.number.desc())).all())
 
 
-def get_next_scar_number(db: Session) -> int:
+def get_next_scar_number(
+    db: Session,
+    counter_name: str = "scars",
+    organization_id: str = "default",
+    repository: str | None = None,
+) -> int:
     stmt = (
         update(ScarCounter)
-        .where(ScarCounter.name == "scars")
+        .where(ScarCounter.name == counter_name)
         .values(current_value=ScarCounter.current_value + 1)
         .returning(ScarCounter.current_value)
     )
@@ -80,27 +98,36 @@ def get_next_scar_number(db: Session) -> int:
     if val is not None:
         return int(val)
 
-    max_num = db.scalar(select(func.coalesce(func.max(Scar.number), 0))) or 0
+    scope_stmt = select(func.coalesce(func.max(Scar.number), 0))
+    if organization_id != "*":
+        scope_stmt = scope_stmt.where(Scar.organization_id == organization_id)
+    if repository:
+        scope_stmt = scope_stmt.where(Scar.repository == repository)
+
+    max_num = db.scalar(scope_stmt) or 0
     allocated = int(max_num) + 1
     try:
         with db.begin_nested():
-            db.add(ScarCounter(name="scars", current_value=allocated))
+            db.add(ScarCounter(name=counter_name, current_value=allocated))
             db.flush()
             return allocated
     except Exception:
         val = db.scalar(stmt)
         if val is not None:
             return int(val)
-        raise RuntimeError("Failed to allocate atomic scar number") from None
+        raise RuntimeError(f"Failed to allocate atomic scar number for {counter_name}") from None
 
 
-def create_scar(db: Session, payload: CreateScarRequest, actor: str) -> Scar:
+def create_scar(db: Session, payload: CreateScarRequest, actor: str, organization_id: str = "default") -> Scar:
+    org_id = payload.organization_id or organization_id or "default"
+    counter_name = f"scars:{org_id}:{payload.repository}" if org_id != "default" else "scars"
     with db.begin():
-        next_number = get_next_scar_number(db)
+        next_number = get_next_scar_number(db, counter_name=counter_name, organization_id=org_id, repository=payload.repository)
         incident_url = str(payload.incident_url) if payload.incident_url else None
         scar = Scar(
             id=new_id("scar"),
             number=next_number,
+            organization_id=org_id,
             title=payload.title,
             incident_summary=payload.incident_summary,
             invariant=payload.invariant,
@@ -117,7 +144,7 @@ def create_scar(db: Session, payload: CreateScarRequest, actor: str) -> Scar:
             active=False,
         )
         db.add(scar)
-        _audit(db, actor, "scar.proposed", payload.model_dump(mode="json"), scar.id)
+        _audit(db, actor, "scar.proposed", payload.model_dump(mode="json"), scar.id, organization_id=org_id)
     return scar
 
 
@@ -147,7 +174,7 @@ def record_validation(db: Session, scar: Scar, actor: str, result: CandidateResu
         "good_hits": result.good_hits,
         "target_hits": result.target_hits,
         "rule_errors": result.rule_errors,
-    }, scar.id)
+    }, scar.id, organization_id=scar.organization_id)
 
 
 def approve_scar(db: Session, scar: Scar, actor: str, approver: str, reason: str) -> Scar:
@@ -158,7 +185,7 @@ def approve_scar(db: Session, scar: Scar, actor: str, approver: str, reason: str
     scar.status = ScarStatus.APPROVED.value
     scar.approved_by = approver
     scar.approved_reason = reason
-    _audit(db, actor, "scar.approved", {"approver": approver, "reason": reason, "revision_id": revision.id, "rule_id": revision.rule_id}, scar.id)
+    _audit(db, actor, "scar.approved", {"approver": approver, "reason": reason, "revision_id": revision.id, "rule_id": revision.rule_id}, scar.id, organization_id=scar.organization_id)
     return scar
 
 
@@ -174,7 +201,7 @@ def activate_scar(db: Session, scar: Scar, actor: str) -> Scar:
     revision.state = "active"
     scar.status = ScarStatus.ACTIVE.value
     scar.active = True
-    _audit(db, actor, "scar.activated", {"approved_by": scar.approved_by, "revision_id": revision.id}, scar.id)
+    _audit(db, actor, "scar.activated", {"approved_by": scar.approved_by, "revision_id": revision.id}, scar.id, organization_id=scar.organization_id)
     return scar
 
 
@@ -203,6 +230,7 @@ def activate_scar_break_glass(db: Session, scar: Scar, actor: str, authorized_by
             "revision_id": revision.id,
         },
         scar.id,
+        organization_id=scar.organization_id,
     )
     return scar
 
@@ -222,18 +250,21 @@ def challenge_scar(db: Session, scar: Scar, actor: str, payload: ChallengeReques
     detail = payload.model_dump(mode="json", exclude={"proposed_rule_yaml", "bad_examples", "good_examples"})
     if payload.proposed_rule_yaml:
         detail["proposed_rule_sha256"] = hashlib.sha256(payload.proposed_rule_yaml.encode()).hexdigest()
-    _audit(db, actor, "scar.challenged", detail, scar.id)
+    _audit(db, actor, "scar.challenged", detail, scar.id, organization_id=scar.organization_id)
     return record
 
 
-def generate_active_rules_yaml(db: Session) -> str:
-    scars = list(
-        db.scalars(
-            select(Scar)
-            .where(Scar.active.is_(True), Scar.enforcement == Enforcement.SEMGREP.value)
-            .order_by(Scar.number.asc())
-        ).all()
-    )
+def generate_active_rules_yaml(
+    db: Session,
+    organization_id: str | None = None,
+    repository: str | None = None,
+) -> str:
+    stmt = select(Scar).where(Scar.active.is_(True), Scar.enforcement == Enforcement.SEMGREP.value)
+    if organization_id and organization_id != "*":
+        stmt = stmt.where(Scar.organization_id == organization_id)
+    if repository:
+        stmt = stmt.where(Scar.repository == repository)
+    scars = list(db.scalars(stmt.order_by(Scar.number.asc())).all())
     merged_rules: list[dict[str, Any]] = []
     for scar in scars:
         revision = assurance.active(db, scar)

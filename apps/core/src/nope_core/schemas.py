@@ -29,6 +29,7 @@ class ScarStatus(StrEnum):
 
 
 class CreateScarRequest(BaseModel):
+    organization_id: str | None = Field(default=None, min_length=1, max_length=100)
     title: str = Field(min_length=8, max_length=160)
     incident_summary: str = Field(min_length=12, max_length=4000)
     invariant: str = Field(min_length=8, max_length=2000)
@@ -45,6 +46,16 @@ class CreateScarRequest(BaseModel):
     @field_validator("title", "incident_summary", "invariant", "rationale", "remediation", "origin", "proposed_by")
     @classmethod
     def strip_and_reject_control_chars(cls, value: str) -> str:
+        cleaned = value.strip()
+        if any(ord(char) < 9 or 13 < ord(char) < 32 for char in cleaned):
+            raise ValueError("control characters are not allowed")
+        return cleaned
+
+    @field_validator("organization_id")
+    @classmethod
+    def strip_organization_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         cleaned = value.strip()
         if any(ord(char) < 9 or 13 < ord(char) < 32 for char in cleaned):
             raise ValueError("control characters are not allowed")
@@ -90,7 +101,7 @@ class AdversarialRequest(BaseModel):
 
 
 class ApprovalRequest(BaseModel):
-    approver: str = Field(min_length=2, max_length=200)
+    approver: str | None = Field(default=None, min_length=2, max_length=200)
     reason: str = Field(min_length=8, max_length=2000)
 
 
@@ -98,7 +109,23 @@ class BreakGlassActivationRequest(BaseModel):
     reason: str = Field(
         min_length=10, max_length=2000, description="Mandatory rationale explaining why GitOps PR merge was bypassed"
     )
-    authorized_by: str = Field(min_length=2, max_length=200, description="Authorized administrator identity")
+    authorized_by: str | None = Field(default=None, min_length=2, max_length=200, description="Authorized administrator identity")
+
+
+class IssueTokenRequest(BaseModel):
+    subject: str = Field(min_length=2, max_length=200)
+    role: str = Field(pattern=r"^(?i)(admin|approver|agent|ci)$")
+    expires_in_seconds: int = Field(default=86400, ge=60, le=2592000)
+    organization: str = Field(default="default", min_length=1, max_length=100)
+
+
+class TokenResponse(BaseModel):
+    token: str
+    token_type: str = "Bearer"
+    subject: str
+    role: str
+    organization: str
+    expires_at: str
 
 
 class ChallengeRequest(BaseModel):
@@ -114,6 +141,7 @@ class ChallengeRequest(BaseModel):
 class ScarResponse(BaseModel):
     id: str
     number: int
+    organization_id: str = "default"
     title: str
     incident_summary: str
     invariant: str
