@@ -19,6 +19,7 @@ This repository is **the product, not just a hack**: it contains the workflow pl
 
 - **`@nope` Switch agent brief** — a reviewable brief that makes the coding agent use the workbench instead of improvising against production.
 - **nope-core** — FastAPI backend with an append-only Scar Ledger, PostgreSQL support, SQLite for local development, API-key RBAC and OpenAPI.
+- **Async validation queue** — `POST /v1/scars/{id}/validate` returns `202 Accepted`; a dedicated `nope-worker` process executes Semgrep jobs and updates `GET /v1/validations/{job_id}`.
 - **Rule Lab** — validates generated rules against:
   - adversarial fixtures the rule **must** flag,
   - known-good examples the rule **must not** flag,
@@ -108,10 +109,11 @@ Slack / Discord / Teams / Telegram / Mattermost
               │                 ├─ drafts rule + fixtures
               │                 └─ uses nope CLI/HTTP only
               ▼                 ▼
-        nope-core (FastAPI) ── Rule Lab (Semgrep in sandbox)
-              │                 └─ validation result
-              ▼
-       Scar Ledger (PostgreSQL; SQLite local)
+        nope-core (FastAPI) ── validation queue (HTTP 202)
+              │                 └─ durable validation jobs
+              ▼                 ▼
+       Scar Ledger (PostgreSQL; SQLite local) ◄── nope-worker
+              │                 (Semgrep in a separate process)
               │
               ▼
 gh API / PR merge webhook → scar active → CI enforcement
@@ -140,7 +142,8 @@ scripts/                   offline demo and production release helpers
 - Rules and exceptions are immutable history rows; status changes are appended, not overwritten.
 - Existing legacy violations are report-only by default (`NOPE_BASELINE_ENFORCE=false`).
 - `@nope challenge` cannot bypass a rule — it creates an expiring, reviewed exception or a narrowed, tested replacement.
-- Semgrep receives no network access and no repo write permissions; nope-core never executes model output directly.
+- Docker packaging includes PostgreSQL and a dedicated `nope-worker`; deployments that scale horizontally must run the same worker for every replica.
+- Semgrep receives no network access and runs in a separate process; nope-core never executes model output directly.
 - Production uses parameterized SQL via SQLAlchemy and no `shell=True` for user input.
 
 ## Repository hygiene and submission

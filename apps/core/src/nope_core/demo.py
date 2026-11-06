@@ -108,9 +108,12 @@ def activate(number: int) -> None:
         scar = db.scalar(select(Scar).where(Scar.number == number))
         if not scar:
             raise SystemExit(f"Scar {number} not found")
-        scar = scar_service.activate_scar(db, scar, "demo:human-approver")
+        scar = scar_service.activate_scar_break_glass(
+            db, scar, "demo:break-glass-admin", "sre@acme.example",
+            "Offline demo cannot emit a GitHub merge webhook; this activation is explicitly break-glass and demo-only.",
+        )
         db.commit()
-        _print("Active", scar_service.scar_response(scar).model_dump())
+        _print("Active (offline demo break-glass only)", scar_service.scar_response(scar).model_dump())
 
 
 def _semgrep(path: Path, expect_findings: bool) -> int:

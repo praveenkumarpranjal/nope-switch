@@ -157,7 +157,7 @@ def _create_approved_scar(client: TestClient) -> dict[str, Any]:
       remediation: Use parameterized db.query(sql, params)
 """
     val_resp = client.post(
-        f"/v1/scars/{scar_id}/validate",
+        f"/v1/scars/{scar_id}/validate?sync=true",
         headers={"X-NOPE-Key": "agent"},
         json={
             "rule_yaml": rule_yaml,

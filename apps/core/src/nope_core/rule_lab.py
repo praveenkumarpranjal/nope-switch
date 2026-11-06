@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import resource
 import shutil
+import signal
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -11,6 +14,19 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+REDOS_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"\([^)]*[\+\*]\)[\+\*]"),
+    re.compile(r"\(\[[^\]]*\][\+\*]\)[\+\*]"),
+    re.compile(r"\([^)]*[\+\*][^)]*[\+\*]\)[\+\*]"),
+    re.compile(r"(\.\*){2,}"),
+    re.compile(r"(\.\+){2,}"),
+]
+
+MAX_PATTERNS = 50
+MAX_FIXTURE_BYTES = 250_000
+MAX_TARGET_BYTES = 50 * 1024 * 1024
+MAX_TARGET_FILES = 500
 
 
 class RuleLabError(RuntimeError):
@@ -30,6 +46,33 @@ def _scan_root() -> Path:
     return Path(os.getenv("NOPE_SCAN_ROOT", os.getcwd())).resolve()
 
 
+def _check_redos(obj: Any) -> None:
+    if isinstance(obj, str):
+        for pattern in REDOS_PATTERNS:
+            if pattern.search(obj):
+                raise RuleLabError(f"Candidate rule contains suspected ReDoS pattern: {obj!r}")
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            _check_redos(k)
+            _check_redos(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            _check_redos(item)
+
+
+def _count_patterns(obj: Any) -> int:
+    count = 0
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if str(k).startswith("pattern"):
+                count += 1
+            count += _count_patterns(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            count += _count_patterns(item)
+    return count
+
+
 def checked_target_path(target_path: str | None) -> Path | None:
     if not target_path:
         return None
@@ -42,6 +85,19 @@ def checked_target_path(target_path: str | None) -> Path | None:
         raise RuleLabError("target_path is outside NOPE_SCAN_ROOT")
     if not resolved.is_dir():
         raise RuleLabError("target_path must be an existing directory")
+
+    total_size = 0
+    total_files = 0
+    for entry in resolved.rglob("*"):
+        if entry.is_file():
+            total_files += 1
+            if total_files > MAX_TARGET_FILES:
+                raise RuleLabError(f"target_path exceeds maximum allowed file count ({MAX_TARGET_FILES} files)")
+            total_size += entry.stat().st_size
+            if total_size > MAX_TARGET_BYTES:
+                raise RuleLabError(
+                    f"target_path exceeds maximum allowed scan size ({MAX_TARGET_BYTES // (1024 * 1024)}MB)"
+                )
     return resolved
 
 
@@ -56,11 +112,41 @@ class RuleLab:
             raise RuleLabError(f"Rule YAML is invalid: {exc}") from exc
         if not isinstance(document, dict) or not isinstance(document.get("rules"), list) or not document["rules"]:
             raise RuleLabError("Rule YAML must contain a non-empty 'rules' list")
+
+        _check_redos(document)
+
+        total_patterns = _count_patterns(document)
+        if total_patterns > MAX_PATTERNS:
+            raise RuleLabError(f"Rule YAML exceeds maximum pattern limit ({MAX_PATTERNS}, found {total_patterns})")
+
         for index, rule in enumerate(document["rules"], start=1):
             if not isinstance(rule, dict):
                 raise RuleLabError(f"Rule {index} must be a mapping")
             if not {"id", "message", "severity", "languages"}.issubset(rule):
                 raise RuleLabError(f"Rule {index} requires id, message, severity and languages")
+
+            mode = rule.get("mode", "search")
+            if mode not in {"search", "taint"}:
+                raise RuleLabError(
+                    f"Rule {index} has unsupported mode '{mode}'; supported modes are 'search' and 'taint'"
+                )
+
+            if mode == "taint":
+                sources = rule.get("pattern-sources")
+                if not sources or not isinstance(sources, list):
+                    raise RuleLabError(f"Taint-mode rule {index} requires a non-empty 'pattern-sources' list")
+                sinks = rule.get("pattern-sinks")
+                if not sinks or not isinstance(sinks, list):
+                    raise RuleLabError(f"Taint-mode rule {index} requires a non-empty 'pattern-sinks' list")
+                if "pattern-sanitizers" in rule and not isinstance(rule["pattern-sanitizers"], list):
+                    raise RuleLabError(f"Taint-mode rule {index} 'pattern-sanitizers' must be a list")
+            else:
+                has_pattern = any(k in rule for k in ("pattern", "patterns", "pattern-either", "pattern-regex"))
+                if not has_pattern:
+                    raise RuleLabError(
+                        f"Rule {index} requires at least one pattern selector (pattern, patterns, pattern-either, or pattern-regex)"
+                    )
+
         return rule_yaml.encode("utf-8")
 
     @staticmethod
@@ -91,8 +177,11 @@ class RuleLab:
             bad_dir.mkdir(parents=True)
             good_dir.mkdir(parents=True)
 
-            bad_paths = self._write_examples(bad_dir, bad_examples)
-            good_paths = self._write_examples(good_dir, good_examples)
+            try:
+                bad_paths = self._write_examples(bad_dir, bad_examples)
+                good_paths = self._write_examples(good_dir, good_examples)
+            except RuleLabError as exc:
+                return CandidateResult(False, {}, {}, [], [str(exc)])
 
             scanned = [bad_dir, good_dir]
             checked_target = checked_target_path(target_path) if target_path else None
@@ -110,12 +199,40 @@ class RuleLab:
                 "--no-error",
                 *(str(path) for path in scanned),
             ]
+
+            def _sandbox_preexec() -> None:
+                try:
+                    cpu_limit = min(self.timeout_seconds, 30)
+                    resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit, cpu_limit + 5))
+                except (ValueError, OSError):
+                    pass
+                if hasattr(resource, "RLIMIT_AS"):
+                    try:
+                        mem_limit = 1_500_000_000
+                        resource.setrlimit(resource.RLIMIT_AS, (mem_limit, mem_limit))
+                    except (ValueError, OSError):
+                        pass
+
             try:
-                completed = subprocess.run(command, capture_output=True, text=True, timeout=self.timeout_seconds, check=False)
+                completed = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout_seconds,
+                    check=False,
+                    preexec_fn=_sandbox_preexec if os.name != "nt" else None,
+                )
             except subprocess.TimeoutExpired:
                 return CandidateResult(False, {}, {}, [], [f"semgrep exceeded {self.timeout_seconds} seconds"])
             except OSError as exc:
                 return CandidateResult(False, {}, {}, [], [f"semgrep could not start: {exc}"])
+
+            if completed.returncode in (-signal.SIGXCPU, -9, 137, 152) or (
+                hasattr(signal, "SIGXCPU") and completed.returncode == -signal.SIGXCPU
+            ):
+                return CandidateResult(
+                    False, {}, {}, [], ["semgrep exceeded sandbox resource limits (CPU or memory quota)"]
+                )
 
             try:
                 payload = json.loads(completed.stdout or "{}")
@@ -154,6 +271,8 @@ class RuleLab:
     def _write_examples(self, directory: Path, examples: list[tuple[str, str]]) -> dict[str, Path]:
         written: dict[str, Path] = {}
         for index, (name, content) in enumerate(examples):
+            if len(content.encode("utf-8")) > MAX_FIXTURE_BYTES:
+                raise RuleLabError(f"Fixture '{name}' exceeds maximum allowed size ({MAX_FIXTURE_BYTES} bytes)")
             path = directory / f"{index}-{Path(name).stem}{self._example_extension(name)}"
             path.write_text(content, encoding="utf-8")
             written[name] = path.resolve()

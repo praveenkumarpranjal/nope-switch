@@ -29,6 +29,20 @@ services:
       postgres:
         condition: service_healthy
 
+  nope-worker:
+    build: .
+    command: ["nope", "worker", "--poll-interval", "1"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://nope:${NOPE_DB_PASSWORD:-nope-local-only-change-me}@postgres:5432/nope
+      NOPE_ENV: production
+      NOPE_SCAN_ROOT: /workspace
+    volumes:
+      - nope-state:/var/lib/nope
+      - .:/workspace:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   postgres-data:
   nope-state:

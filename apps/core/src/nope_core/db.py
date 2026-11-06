@@ -132,6 +132,21 @@ class WebhookDelivery(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(32), nullable=False)
 
 
+class ValidationJob(Base, TimestampMixin):
+    __tablename__ = "validation_jobs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    scar_id: Mapped[str] = mapped_column(ForeignKey("scars.id", ondelete="SET NULL"), index=True, nullable=True)
+    actor: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), index=True, nullable=False, default="pending")
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 _ensure_sqlite_parent(settings.database_url)
 connect_args = {"timeout": 30.0} if settings.database_url.startswith("sqlite") else {}
 engine = create_engine(settings.database_url, pool_pre_ping=True, future=True, connect_args=connect_args)

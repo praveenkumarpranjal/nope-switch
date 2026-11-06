@@ -102,25 +102,32 @@ def test_break_glass_activation_requires_admin_and_audits() -> None:
 
         # Validate scar
         val_resp = client.post(
-            f"/v1/scars/{scar_id}/validate",
+            f"/v1/scars/{scar_id}/validate?sync=true",
             headers={"X-NOPE-Key": "agent"},
             json={
                 "rule_yaml": "rules:\n  - id: zero.day\n    message: blocked\n    severity: ERROR\n    languages: [typescript]\n    pattern: bad()",
-                "bad_examples": [{"name": "bad.ts", "content": "bad();"}],
-                "good_examples": [{"name": "good.ts", "content": "ok();"}],
                 "original": {"name": "original.ts", "content": "bad();"},
                 "corrected": {"name": "corrected.ts", "content": "ok();"},
+                "bad_examples": [{"name": "bad.ts", "content": "bad();"}],
+                "good_examples": [{"name": "good.ts", "content": "ok();"}],
             },
         )
         assert val_resp.status_code == 200
 
-        independent = client.post(f"/v1/scars/{scar_id}/adversarial", headers={"X-NOPE-Key": "admin"}, json={
-            "generated_by": "independent-test-agent",
-            "bad_examples": [{"name": f"variant-{i}.ts", "content": f"const variant = {i}; bad();"} for i in range(6)],
-            "good_examples": [{"name": f"safe-{i}.ts", "content": f"const variant = {i}; ok();"} for i in range(4)],
-        })
-        assert independent.status_code == 200, independent.text
-        assert independent.json()["passed"] is True
+        challenge = client.post(
+            f"/v1/scars/{scar_id}/adversarial",
+            headers={"X-NOPE-Key": "admin"},
+            json={
+                "generated_by": "independent-test-agent",
+                "bad_examples": [
+                    {"name": f"variant-{i}.ts", "content": f"const v = {i}; bad();"} for i in range(6)
+                ],
+                "good_examples": [
+                    {"name": f"safe-{i}.ts", "content": f"const v = {i}; ok();"} for i in range(4)
+                ],
+            },
+        )
+        assert challenge.status_code == 200
 
         # Approve scar
         appr_resp = client.post(

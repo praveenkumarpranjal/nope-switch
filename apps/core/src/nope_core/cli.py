@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from pathlib import Path
+from typing import Any
 
 import httpx
 import yaml
@@ -108,6 +110,28 @@ def sync_rules_to_file(output_path: Path, base_url: str | None = None, key: str 
     return 0
 
 
+def wait_for_validation(response: httpx.Response, timeout: float) -> dict[str, Any]:
+    body: dict[str, Any] = response.json()
+    if response.status_code != 202:
+        return body
+    status_url = body.get("status_url")
+    if not status_url:
+        raise SystemExit("Validation request returned 202 without status_url")
+    deadline = time.time() + timeout
+    with httpx.Client(base_url=BASE_URL, headers={"X-NOPE-Key": DEFAULT_KEY}, timeout=30) as session:
+        while time.time() < deadline:
+            poll = session.get(status_url)
+            poll.raise_for_status()
+            job = poll.json()
+            if job.get("status") == "completed":
+                return job.get("result") or {}
+            if job.get("status") == "failed":
+                print(f"Validation job failed: {job.get('error')}")
+                raise SystemExit(1)
+            time.sleep(1.0)
+    raise SystemExit(f"Validation timed out after {timeout:.0f}s; job {body.get('job_id')} is still pending")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="nope", description="Operate the NOPE Scar Ledger")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -129,6 +153,8 @@ def main() -> None:
     validate.add_argument("--target", type=Path, default=None)
     validate.add_argument("--original", type=Path, required=True, help="Original incident's vulnerable code")
     validate.add_argument("--corrected", type=Path, required=True, help="Corrected incident code")
+    validate.add_argument("--timeout", type=float, default=300.0, help="Maximum seconds to wait for asynchronous validation")
+    validate.add_argument("--sync", action="store_true", help="Debug only: run validation inline in the nope-core request")
 
     adversarial = sub.add_parser("adversarial", help="Submit a separate agent's independent challenge")
     adversarial.add_argument("scar")
@@ -188,6 +214,10 @@ def main() -> None:
     sync_rules.add_argument("--base-url", default=None, help="Base URL of nope-core service")
     sync_rules.add_argument("--ci-key", default=None, help="API key for nope-core")
 
+    worker = sub.add_parser("worker", help="Process asynchronous Rule Lab validation jobs")
+    worker.add_argument("--poll-interval", type=float, default=1.0)
+    worker.add_argument("--max-jobs", type=int, default=None)
+
     args = parser.parse_args()
     if args.command == "health":
         with client(None) as session:
@@ -211,7 +241,11 @@ def main() -> None:
             "corrected": {"name": args.corrected.name, "content": read_structured_file(args.corrected)},
         }
         with client() as session:
-            dump(session.post(f"/v1/scars/{args.scar}/validate", json=payload))
+            response = session.post(f"/v1/scars/{args.scar}/validate", json=payload, params={"sync": "true"} if args.sync else None)
+            if args.sync:
+                dump(response)
+            else:
+                print(json.dumps(wait_for_validation(response, args.timeout), indent=2, sort_keys=True, default=str))
     elif args.command == "adversarial":
         with client() as session:
             dump(session.post(f"/v1/scars/{args.scar}/adversarial", json=json.loads(read_structured_file(args.data))))
@@ -250,6 +284,10 @@ def main() -> None:
                 "check_url": args.check_url,
                 "revision_id": args.revision_id,
             }))
+    elif args.command == "worker":
+        from nope_core import validation_jobs
+
+        raise SystemExit(validation_jobs.run_worker(args.poll_interval, args.max_jobs))
     elif args.command == "report":
         from nope_core.reporter import process_scan_file
         code = process_scan_file(

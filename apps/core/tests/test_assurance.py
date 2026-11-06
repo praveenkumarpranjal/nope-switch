@@ -65,7 +65,7 @@ def create(client: TestClient) -> str:
 
 def validate(client: TestClient, scar: str, rule: str = RULE) -> dict[str, Any]:
     response = client.post(
-        f"/v1/scars/{scar}/validate",
+        f"/v1/scars/{scar}/validate?sync=true",
         headers=AGENT,
         json={
             "rule_yaml": rule,
@@ -173,8 +173,15 @@ def test_failed_replacement_preserves_active_rule_and_historical_evidence(
         },
     )
     assert response.status_code == 202, response.text
-    assert response.json()["replacement_validation"] is False
-    regression = response.json()["regression"]
+    from nope_core import validation_jobs
+
+    assert validation_jobs.run_once() == 1
+    job_response = client.get(response.json()["replacement_status_url"], headers=AGENT)
+    assert job_response.status_code == 200
+    assert job_response.json()["status"] == "completed"
+    replacement_result = job_response.json()["result"]
+    assert replacement_result["passed"] is False
+    regression = replacement_result["regression"]
     assert regression["passed"] is False
     assert regression["bad_examples"] == 8  # incident + author fixture + six independent variants
     assert regression["good_examples"] == 6

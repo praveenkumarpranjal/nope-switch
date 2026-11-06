@@ -9,9 +9,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse
-from nope_core import assurance, scar_service
+from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse
+from nope_core import assurance, scar_service, validation_jobs, validation_pipeline
 from nope_core.auth import AdminRequired, AgentRequired, ApproverRequired, CiRequired
 from nope_core.config import settings
 from nope_core.db import (
@@ -19,6 +19,7 @@ from nope_core.db import (
     RuleVersion,
     Scar,
     SessionLocal,
+    ValidationJob,
     WebhookDelivery,
     init_db,
     new_id,
@@ -87,41 +88,36 @@ def get_scar(scar_id_or_number: str, _: AgentRequired) -> dict[str, Any]:
 
 
 @app.post("/v1/scars/{scar_id_or_number}/validate")
-def validate_scar(scar_id_or_number: str, payload: ValidateScarRequest, actor: AgentRequired) -> dict[str, Any]:
+def validate_scar(scar_id_or_number: str, payload: ValidateScarRequest, actor: AgentRequired, sync: bool = Query(False)) -> Any:
     with SessionLocal() as db:
         scar = _load_scar(db, scar_id_or_number)
         if not scar:
             raise HTTPException(status_code=404, detail="Scar not found")
-        try:
-            rule = scar_service.add_rule_version(db, scar, payload.rule_yaml)
-            db.flush()
-            revision = assurance.build_revision(db, scar, rule, actor, {
-                "original": payload.original.model_dump(), "corrected": payload.corrected.model_dump(),
-                "bad": [e.model_dump() for e in payload.bad_examples],
-                "good": [e.model_dump() for e in payload.good_examples], "target_path": payload.target_path,
-            }, lab)
-        except RuleLabError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        report = json.loads(revision.report)
-        scar.status = "validated" if revision.state == "validated" else "proposed"
-        scar.approved_by = None
-        scar.approved_reason = None
-        scar_service._audit(db, actor, "scar.validation_passed" if revision.state == "validated" else "scar.validation_failed",
-                            {"revision_id": revision.id, "rule_id": rule.id, **report}, scar.id)
+        if sync:
+            try:
+                result = validation_pipeline.execute(db, scar, payload, actor, lab)
+            except RuleLabError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            db.commit()
+            return result
+
+        job = validation_jobs.enqueue_validation(db, scar, payload, actor)
         db.commit()
-        return {
-            "passed": revision.state == "validated",
-            "revision_id": revision.id,
-            "replay": report["replay"], "regression": report["regression"],
-            "quality_threshold": report["quality_threshold"],
-            "bad_findings": report["candidate"]["bad_hits"],
-            "good_findings": report["candidate"]["good_hits"],
-            "target_findings": report["candidate"]["target_hits"],
-            "rule_errors": report["candidate"]["rule_errors"],
-            "total_bad_examples": len(payload.bad_examples),
-            "total_good_examples": len(payload.good_examples),
-            "scar": scar_service.scar_response(scar).model_dump(mode="json"),
-        }
+        status_url = f"/v1/validations/{job.id}"
+        return JSONResponse(
+            status_code=202,
+            content={"job_id": job.id, "status": job.status, "status_url": status_url},
+            headers={"Location": status_url},
+        )
+
+
+@app.get("/v1/validations/{job_id}")
+def get_validation(job_id: str, _: AgentRequired) -> dict[str, Any]:
+    with SessionLocal() as db:
+        job = db.get(ValidationJob, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Validation job not found")
+        return validation_jobs.job_response(job)
 
 
 @app.post("/v1/scars/{scar_id_or_number}/adversarial")
@@ -238,6 +234,7 @@ def challenge_scar(scar_id_or_number: str, payload: ChallengeRequest, actor: Age
         if not scar:
             raise HTTPException(status_code=404, detail="Scar not found")
         replacement = None
+        replacement_job = None
         if payload.proposed_rule_yaml:
             previous = assurance.active(db, scar)
             if previous is None:
@@ -246,6 +243,7 @@ def challenge_scar(scar_id_or_number: str, payload: ChallengeRequest, actor: Age
             replacement = ValidateScarRequest(rule_yaml=payload.proposed_rule_yaml,
                 original=suite["original"], corrected=suite["corrected"],
                 bad_examples=payload.bad_examples or suite["bad"], good_examples=payload.good_examples or suite["good"])
+            replacement_job = validation_jobs.enqueue_validation(db, scar, replacement, actor)
         record = scar_service.challenge_scar(db, scar, actor, payload)
         db.commit()
         response = {
@@ -254,11 +252,10 @@ def challenge_scar(scar_id_or_number: str, payload: ChallengeRequest, actor: Age
             "expires_at": record.expires_at.isoformat() if record.expires_at else None,
             "replacement_validation": None,
         }
-    if replacement:
-        validation = validate_scar(scar_id_or_number, replacement, actor)
-        response["replacement_validation"] = validation["passed"]
-        response["revision_id"] = validation["revision_id"]
-        response["regression"] = validation["regression"]
+        if replacement_job is not None:
+            status_url = f"/v1/validations/{replacement_job.id}"
+            response["replacement_job_id"] = replacement_job.id
+            response["replacement_status_url"] = status_url
     return response
 
 
