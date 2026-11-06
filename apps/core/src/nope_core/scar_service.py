@@ -22,6 +22,7 @@ from nope_core.schemas import (
     ChallengeRequest,
     CreateScarRequest,
     Enforcement,
+    ExceptionResponse,
     ScarResponse,
     ScarStatus,
 )
@@ -240,8 +241,10 @@ def challenge_scar(db: Session, scar: Scar, actor: str, payload: ChallengeReques
     record = ExceptionRecord(
         id=new_id("exc"),
         scar_id=scar.id,
+        organization_id=scar.organization_id,
         requested_by=payload.requested_by,
         reason=payload.reason,
+        path_pattern=payload.path_pattern,
         status="pending",
         expires_at=expires,
         approver=None,
@@ -252,6 +255,75 @@ def challenge_scar(db: Session, scar: Scar, actor: str, payload: ChallengeReques
         detail["proposed_rule_sha256"] = hashlib.sha256(payload.proposed_rule_yaml.encode()).hexdigest()
     _audit(db, actor, "scar.challenged", detail, scar.id, organization_id=scar.organization_id)
     return record
+
+
+def _as_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def exception_response(exc: ExceptionRecord, scar: Scar | None = None) -> ExceptionResponse:
+    now = datetime.now(UTC)
+    exp = _as_utc(exc.expires_at)
+    is_expired = exp is not None and exp <= now
+    scar_num = scar.number if scar else getattr(exc.scar, "number", None)
+    return ExceptionResponse(
+        id=exc.id,
+        scar_id=exc.scar_id,
+        scar_number=scar_num,
+        organization_id=exc.organization_id,
+        requested_by=exc.requested_by,
+        reason=exc.reason,
+        path_pattern=exc.path_pattern,
+        status=exc.status,
+        expires_at=exc.expires_at,
+        approver=exc.approver,
+        approved_at=exc.approved_at,
+        is_expired=is_expired,
+    )
+
+
+def approve_exception(db: Session, exception_id: str, approver: str, reason: str, actor: str) -> ExceptionRecord:
+    exc = db.get(ExceptionRecord, exception_id)
+    if exc is None:
+        raise ValueError(f"Exception {exception_id} not found")
+    if exc.status == "approved":
+        return exc
+    exc.status = "approved"
+    exc.approver = approver
+    exc.approved_at = datetime.now(UTC)
+    scar = db.get(Scar, exc.scar_id)
+    org_id = scar.organization_id if scar else exc.organization_id
+    _audit(
+        db,
+        actor,
+        "exception.approved",
+        {"exception_id": exc.id, "approver": approver, "reason": reason, "scar_id": exc.scar_id},
+        scar_id=exc.scar_id,
+        organization_id=org_id,
+    )
+    return exc
+
+
+def list_active_exceptions(
+    db: Session,
+    organization_id: str | None = None,
+    repository: str | None = None,
+    include_expired: bool = False,
+) -> list[ExceptionRecord]:
+    stmt = select(ExceptionRecord).join(Scar, ExceptionRecord.scar_id == Scar.id)
+    if organization_id and organization_id != "*":
+        stmt = stmt.where(ExceptionRecord.organization_id == organization_id)
+    if repository:
+        stmt = stmt.where(Scar.repository == repository)
+    stmt = stmt.where(ExceptionRecord.status == "approved")
+    if not include_expired:
+        now = datetime.now(UTC)
+        stmt = stmt.where((ExceptionRecord.expires_at.is_(None)) | (ExceptionRecord.expires_at > now))
+    return list(db.scalars(stmt.order_by(ExceptionRecord.created_at.desc())).all())
 
 
 def generate_active_rules_yaml(

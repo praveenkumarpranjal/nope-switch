@@ -5,13 +5,14 @@ import hmac
 import json
 import os
 import re
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, cast
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
-from nope_core import assurance, scar_service, validation_jobs, validation_pipeline
+from nope_core import assurance, metrics, scar_service, validation_jobs, validation_pipeline
 from nope_core.auth import (
     AdminRequired,
     AgentRequired,
@@ -23,6 +24,7 @@ from nope_core.auth import (
 from nope_core.config import settings
 from nope_core.db import (
     AuditEvent,
+    ExceptionRecord,
     RuleVersion,
     Scar,
     SessionLocal,
@@ -35,9 +37,11 @@ from nope_core.rule_lab import RuleLab, RuleLabError
 from nope_core.schemas import (
     AdversarialRequest,
     ApprovalRequest,
+    ApproveExceptionRequest,
     BreakGlassActivationRequest,
     ChallengeRequest,
     CreateScarRequest,
+    ExceptionResponse,
     IssueTokenRequest,
     ScarStatus,
     TokenResponse,
@@ -56,6 +60,57 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="NOPE Never-Again Compiler", version="1.0.0", docs_url="/docs", redoc_url=None, lifespan=lifespan)
 lab = RuleLab()
+
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next: Any) -> Response:
+    start_time = time.perf_counter()
+    response = cast(Response, await call_next(request))
+    duration = time.perf_counter() - start_time
+    endpoint = request.url.path
+    metrics.NOPE_REQUEST_DURATION.observe(duration, labels={"method": request.method, "endpoint": endpoint})
+    return response
+
+
+def _collect_db_metrics() -> None:
+    from datetime import UTC, datetime
+    with SessionLocal() as db:
+        # Scars by status and org
+        scars = list(db.scalars(select(Scar)).all())
+        counts: dict[tuple[str, str], int] = {}
+        for s in scars:
+            key = (s.status, s.organization_id)
+            counts[key] = counts.get(key, 0) + 1
+        for (st, org), c in counts.items():
+            metrics.NOPE_SCARS_TOTAL.set(float(c), labels={"status": st, "organization_id": org})
+
+        # Exceptions by status and org
+        excs = list(db.scalars(select(ExceptionRecord)).all())
+        now = datetime.now(UTC)
+        exc_counts: dict[tuple[str, str], int] = {}
+        for e in excs:
+            st = "expired" if (e.status == "approved" and e.expires_at and e.expires_at <= now) else e.status
+            k = (st, e.organization_id)
+            exc_counts[k] = exc_counts.get(k, 0) + 1
+        for (st, org), c in exc_counts.items():
+            metrics.NOPE_EXCEPTIONS_TOTAL.set(float(c), labels={"status": st, "organization_id": org})
+
+        # Active rules
+        active_scars = [s for s in scars if s.active]
+        active_by_org: dict[str, int] = {}
+        for s in active_scars:
+            active_by_org[s.organization_id] = active_by_org.get(s.organization_id, 0) + 1
+        for org, c in active_by_org.items():
+            metrics.NOPE_ACTIVE_RULES_TOTAL.set(float(c), labels={"organization_id": org})
+
+
+metrics.REGISTRY.add_collector(_collect_db_metrics)
+
+
+@app.get("/metrics", response_class=Response)
+def get_metrics() -> Response:
+    content = metrics.REGISTRY.generate_prometheus()
+    return Response(content=content, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 @app.get("/health")
@@ -126,9 +181,18 @@ def validate_scar(scar_id_or_number: str, payload: ValidateScarRequest, actor: A
         if not scar:
             raise HTTPException(status_code=404, detail="Scar not found")
         if sync:
+            val_start = time.perf_counter()
             try:
                 result = validation_pipeline.execute(db, scar, payload, actor, lab)
+                metrics.NOPE_VALIDATION_DURATION.observe(
+                    time.perf_counter() - val_start,
+                    labels={"status": "passed" if result.get("passed") else "failed"},
+                )
             except RuleLabError as exc:
+                metrics.NOPE_VALIDATION_DURATION.observe(
+                    time.perf_counter() - val_start,
+                    labels={"status": "error"},
+                )
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
             db.commit()
             return result
@@ -316,6 +380,40 @@ def challenge_scar(scar_id_or_number: str, payload: ChallengeRequest, actor: Age
     return response
 
 
+@app.get("/v1/exceptions/active")
+def list_active_exceptions(
+    actor: CiRequired,
+    repository: str | None = None,
+    include_expired: bool = False,
+) -> list[ExceptionResponse]:
+    """Retrieve active and unexpired challenge exceptions for CI enforcement."""
+    with SessionLocal() as db:
+        records = scar_service.list_active_exceptions(
+            db, organization_id=actor.organization, repository=repository, include_expired=include_expired
+        )
+        return [scar_service.exception_response(exc) for exc in records]
+
+
+@app.post("/v1/exceptions/{exception_id}/approve")
+def approve_exception(
+    exception_id: str,
+    payload: ApproveExceptionRequest,
+    actor: ApproverRequired,
+) -> ExceptionResponse:
+    """Approve a temporary rule challenge exception."""
+    with SessionLocal() as db:
+        exc = db.get(ExceptionRecord, exception_id)
+        if exc is None or (actor.organization != "*" and exc.organization_id != actor.organization):
+            raise HTTPException(status_code=404, detail="Exception not found")
+        approver = actor.subject if (actor.is_user_identity or not payload.approver) else payload.approver
+        try:
+            exc = scar_service.approve_exception(db, exception_id, approver, payload.reason, actor)
+            db.commit()
+            return scar_service.exception_response(exc)
+        except ValueError as exc_err:
+            raise HTTPException(status_code=409, detail=str(exc_err)) from exc_err
+
+
 class CiFailure(BaseModel):
     repository: str = Field(min_length=3, max_length=200)
     sha: str = Field(pattern=r"^[0-9a-f]{7,40}$")
@@ -352,6 +450,9 @@ def ci_failure(payload: CiFailure, actor: CiRequired) -> dict[str, Any]:
             action="ci.failure_observed",
             detail=json.dumps(detail),
         ))
+        metrics.NOPE_CI_FAILURES_TOTAL.inc(
+            labels={"scar_number": str(payload.scar_number), "repository": payload.repository}
+        )
         db.commit()
         return {
             "scar_number": scar.number,

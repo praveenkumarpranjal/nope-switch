@@ -132,10 +132,31 @@ class ChallengeRequest(BaseModel):
     challenger: str = Field(min_length=2, max_length=200)
     reason: str = Field(min_length=12, max_length=4000)
     requested_by: str = Field(min_length=2, max_length=200)
+    path_pattern: str | None = Field(default=None, max_length=500, description="Optional path pattern to exclude")
     proposed_rule_yaml: str | None = Field(default=None, max_length=250_000)
     bad_examples: list[ScarExample] = Field(default_factory=list, max_length=20)
     good_examples: list[ScarExample] = Field(default_factory=list, max_length=20)
     expires_in_days: int = Field(default=14, ge=1, le=90)
+
+
+class ApproveExceptionRequest(BaseModel):
+    approver: str | None = Field(default=None, min_length=2, max_length=200)
+    reason: str = Field(min_length=8, max_length=2000)
+
+
+class ExceptionResponse(BaseModel):
+    id: str
+    scar_id: str
+    scar_number: int | None = None
+    organization_id: str
+    requested_by: str
+    reason: str
+    path_pattern: str | None
+    status: str
+    expires_at: datetime | None
+    approver: str | None
+    approved_at: datetime | None
+    is_expired: bool
 
 
 class ScarResponse(BaseModel):

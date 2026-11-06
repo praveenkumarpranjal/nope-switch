@@ -82,6 +82,23 @@ def get_check_url(repo: str, sha: str) -> str:
     return os.getenv("CI_CHECK_URL", f"https://ci.local/build/{sha[:8]}")
 
 
+def fetch_active_exceptions(base_url: str, ci_key: str, repo: str) -> list[dict[str, Any]]:
+    target = urljoin(base_url, "/v1/exceptions/active")
+    headers: dict[str, str] = {"X-NOPE-Key": ci_key}
+    if ci_key.count(".") == 2:
+        headers["Authorization"] = f"Bearer {ci_key}"
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.get(target, params={"repository": repo, "include_expired": "true"}, headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, list):
+                    return data
+    except Exception:
+        pass
+    return []
+
+
 def report_failure_to_api(
     base_url: str,
     ci_key: str,
@@ -91,7 +108,9 @@ def report_failure_to_api(
     check_url: str,
     revision_id: str | None = None,
 ) -> dict[str, Any] | None:
-    headers = {"X-NOPE-Key": ci_key}
+    headers: dict[str, str] = {"X-NOPE-Key": ci_key}
+    if ci_key.count(".") == 2:
+        headers["Authorization"] = f"Bearer {ci_key}"
     payload = {
         "repository": repo,
         "sha": sha,
@@ -268,6 +287,50 @@ def process_scan_file(
                 "incident": metadata.get("incident", "Historical incident"),
                 **{key: metadata.get(key) for key in ("revision_id", "approved_rule", "tests", "history")},
             }
+
+    # Filter active exceptions
+    exceptions = fetch_active_exceptions(resolved_base_url, resolved_ci_key, repo)
+    active_findings_by_scar: dict[int, list[dict[str, Any]]] = {}
+    excluded_count = 0
+
+    for scar_num, items in findings_by_scar.items():
+        unexcluded_items: list[dict[str, Any]] = []
+        for finding in items:
+            f_path = finding.get("path", "")
+            matched_exc = None
+            for exc_entry in exceptions:
+                if exc_entry.get("scar_number") == scar_num and exc_entry.get("status") == "approved":
+                    pattern = exc_entry.get("path_pattern")
+                    if not pattern or pattern in f_path:
+                        if exc_entry.get("is_expired"):
+                            exp_date = exc_entry.get("expires_at", "earlier")
+                            exc_id_val = str(exc_entry.get("id", "unknown"))
+                            alert_msg = f"Exception {exc_id_val} for Scar #{scar_num:03d} expired on {exp_date}. Rule is actively blocking."
+                            print(
+                                f"[NOPE] ⚠️  {alert_msg}: {f_path}",
+                                file=sys.stderr,
+                            )
+                            if os.getenv("GITHUB_ACTIONS") == "true":
+                                print(
+                                    f"::warning file={escape_property(f_path)}::{escape_data(alert_msg)}"
+                                )
+                        else:
+                            matched_exc = exc_entry
+                            break
+            if matched_exc:
+                excluded_count += 1
+                print(f"[NOPE] Notice: Finding in {f_path} excluded by active exception {matched_exc.get('id')}.")
+            else:
+                unexcluded_items.append(finding)
+        if unexcluded_items:
+            active_findings_by_scar[scar_num] = unexcluded_items
+
+    if not active_findings_by_scar:
+        if excluded_count > 0:
+            print(f"[NOPE] All {excluded_count} detected findings are covered by approved, active exceptions. CI passing.")
+        return 0
+
+    findings_by_scar = active_findings_by_scar
 
     # Query API or use fallback for each Scar
     scar_data: dict[int, dict[str, Any]] = {}

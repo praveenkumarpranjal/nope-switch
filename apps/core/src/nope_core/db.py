@@ -100,11 +100,14 @@ class ExceptionRecord(Base, TimestampMixin):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     scar_id: Mapped[str] = mapped_column(ForeignKey("scars.id", ondelete="CASCADE"), index=True, nullable=False)
+    organization_id: Mapped[str] = mapped_column(String(100), index=True, nullable=False, default="default")
     requested_by: Mapped[str] = mapped_column(String(200), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
+    path_pattern: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     approver: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     scar: Mapped[Scar] = relationship(back_populates="exceptions")
 
