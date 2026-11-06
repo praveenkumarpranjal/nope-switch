@@ -21,6 +21,7 @@ from nope_core.rule_lab import CandidateResult
 from nope_core.schemas import (
     ChallengeRequest,
     CreateScarRequest,
+    Enforcement,
     ScarResponse,
     ScarStatus,
 )
@@ -226,7 +227,13 @@ def challenge_scar(db: Session, scar: Scar, actor: str, payload: ChallengeReques
 
 
 def generate_active_rules_yaml(db: Session) -> str:
-    scars = list(db.scalars(select(Scar).where(Scar.active.is_(True)).order_by(Scar.number.asc())).all())
+    scars = list(
+        db.scalars(
+            select(Scar)
+            .where(Scar.active.is_(True), Scar.enforcement == Enforcement.SEMGREP.value)
+            .order_by(Scar.number.asc())
+        ).all()
+    )
     merged_rules: list[dict[str, Any]] = []
     for scar in scars:
         revision = assurance.active(db, scar)

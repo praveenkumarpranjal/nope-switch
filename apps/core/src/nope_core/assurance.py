@@ -2,29 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
-from nope_core.db import Base, RuleVersion, Scar, new_id
+from nope_core.db import Revision, RuleVersion, Scar, new_id
 from nope_core.rule_lab import RuleLab
-from sqlalchemy import ForeignKey, Integer, String, Text, select
-from sqlalchemy.orm import Mapped, Session, mapped_column
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-
-class Revision(Base):
-    __tablename__ = "scar_revisions"
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    scar_id: Mapped[str] = mapped_column(ForeignKey("scars.id"), index=True)
-    rule_id: Mapped[str] = mapped_column(ForeignKey("rule_versions.id"))
-    sequence: Mapped[int] = mapped_column(Integer)
-    author: Mapped[str] = mapped_column(String(200))
-    state: Mapped[str] = mapped_column(String(24), default="draft")
-    fixtures: Mapped[str] = mapped_column(Text)
-    report: Mapped[str] = mapped_column(Text)
-    adversary: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    challenge: Mapped[str | None] = mapped_column(Text, nullable=True)
-
+# Re-export Revision for backwards compatibility
+__all__ = ["QUALITY", "Revision", "active", "adversarial", "build_revision", "latest", "pairs", "require_quality"]
 
 QUALITY = {
     "min_bad_examples": 6,
@@ -78,6 +66,28 @@ def build_revision(
             for i, e in enumerate(items)
         ]
 
+    # Deduplicate historical fixtures by content hash to prevent quadratic growth and file limit exhaustion
+    seen_bad: set[str] = set()
+    deduped_bad: list[dict[str, str]] = []
+    for e in historical["bad"]:
+        content_hash = hashlib.sha256(e["content"].strip().encode()).hexdigest()
+        if content_hash not in seen_bad:
+            seen_bad.add(content_hash)
+            deduped_bad.append(e)
+
+    seen_good: set[str] = set()
+    deduped_good: list[dict[str, str]] = []
+    for e in historical["good"]:
+        content_hash = hashlib.sha256(e["content"].strip().encode()).hexdigest()
+        if content_hash not in seen_good:
+            seen_good.add(content_hash)
+            deduped_good.append(e)
+
+    # Bound historical regression suites to prevent runaway resource exhaustion
+    MAX_HISTORICAL = 100
+    deduped_bad = deduped_bad[-MAX_HISTORICAL:]
+    deduped_good = deduped_good[-MAX_HISTORICAL:]
+
     replay = lab.validate(
         rule.rule_yaml, pairs([fixtures["original"]]), pairs([fixtures["corrected"]])
     )
@@ -85,8 +95,8 @@ def build_revision(
         rule.rule_yaml, pairs(fixtures["bad"]), pairs(fixtures["good"]), fixtures.get("target_path")
     )
     regression = (
-        lab.validate(rule.rule_yaml, renamed(historical["bad"]), renamed(historical["good"]))
-        if historical["bad"]
+        lab.validate(rule.rule_yaml, renamed(deduped_bad), renamed(deduped_good))
+        if deduped_bad
         else None
     )
     report = {
@@ -99,8 +109,8 @@ def build_revision(
         "candidate": candidate.__dict__,
         "regression": {
             "passed": regression.passed if regression else True,
-            "bad_examples": len(historical["bad"]),
-            "good_examples": len(historical["good"]),
+            "bad_examples": len(deduped_bad),
+            "good_examples": len(deduped_good),
             "result": regression.__dict__ if regression else None,
         },
         "quality_threshold": dict(QUALITY),
@@ -131,15 +141,21 @@ def adversarial(
         raise ValueError("Challenge a pending revision; approved evidence is immutable")
     if revision.challenge is not None:
         raise ValueError("Challenge evidence is immutable; submit a new rule revision to retry")
-    author_suite = json.loads(revision.fixtures)
+    author_suite = json.loads(revision.fixtures or "{}")
+    all_author_examples: list[dict[str, Any]] = []
+    if isinstance(author_suite.get("original"), dict):
+        all_author_examples.append(author_suite["original"])
+    if isinstance(author_suite.get("corrected"), dict):
+        all_author_examples.append(author_suite["corrected"])
+    if isinstance(author_suite.get("bad"), list):
+        all_author_examples.extend(e for e in author_suite["bad"] if isinstance(e, dict))
+    if isinstance(author_suite.get("good"), list):
+        all_author_examples.extend(e for e in author_suite["good"] if isinstance(e, dict))
+
     author_content = {
-        e["content"].strip()
-        for e in [
-            author_suite["original"],
-            author_suite["corrected"],
-            *author_suite["bad"],
-            *author_suite["good"],
-        ]
+        str(e["content"]).strip()
+        for e in all_author_examples
+        if "content" in e and e["content"] is not None
     }
     examples = payload["bad_examples"] + payload["good_examples"]
     if any(e["content"].strip() in author_content for e in examples):
@@ -153,13 +169,15 @@ def adversarial(
     detections = sum(h > 0 for h in result.bad_hits.values())
     total_bad, total_good = len(payload["bad_examples"]), len(payload["good_examples"])
     false_positives = sum(h > 0 for h in result.good_hits.values())
+    detection_rate = (detections / total_bad) if total_bad > 0 else 0.0
+    false_positive_rate = (false_positives / total_good) if total_good > 0 else 0.0
     metrics = {
         "detections": detections,
-        "misses": total_bad - detections,
+        "misses": max(0, total_bad - detections),
         "false_positives": false_positives,
-        "true_negatives": total_good - false_positives,
-        "detection_rate": detections / total_bad,
-        "false_positive_rate": false_positives / total_good,
+        "true_negatives": max(0, total_good - false_positives),
+        "detection_rate": detection_rate,
+        "false_positive_rate": false_positive_rate,
         "bad_findings": result.bad_hits,
         "good_findings": result.good_hits,
         "errors": result.rule_errors,

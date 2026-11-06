@@ -120,6 +120,15 @@ def get_validation(job_id: str, _: AgentRequired) -> dict[str, Any]:
         return validation_jobs.job_response(job)
 
 
+def _safe_json_loads(data: str | None, default: Any = None) -> Any:
+    if not data:
+        return default
+    try:
+        return json.loads(data)
+    except (json.JSONDecodeError, TypeError):
+        return default if default is not None else {"raw": data}
+
+
 @app.post("/v1/scars/{scar_id_or_number}/adversarial")
 def adversarial_scar(scar_id_or_number: str, payload: AdversarialRequest, actor: AgentRequired) -> dict[str, Any]:
     with SessionLocal() as db:
@@ -129,6 +138,10 @@ def adversarial_scar(scar_id_or_number: str, payload: AdversarialRequest, actor:
         revision = assurance.latest(db, scar)
         if revision is None:
             raise HTTPException(409, "Validate a rule revision first")
+        if revision.challenge is not None:
+            raise HTTPException(409, "Challenge evidence is immutable; submit a new rule revision to retry")
+        if revision.state not in {"draft", "validated"}:
+            raise HTTPException(409, "Challenge a pending revision; approved evidence is immutable")
         try:
             metrics = assurance.adversarial(db, revision, actor, payload.model_dump(), lab)
         except (ValueError, RuleLabError) as exc:
@@ -167,10 +180,10 @@ def scar_provenance(scar_id_or_number: str, _: CiRequired) -> dict[str, Any]:
         return {"scar": scar_service.scar_response(scar).model_dump(mode="json"),
                 "revisions": [{"id": r.id, "sequence": r.sequence, "rule_id": r.rule_id,
                                "state": r.state, "author": r.author, "adversary": r.adversary,
-                               "report": json.loads(r.report), "challenge": json.loads(r.challenge) if r.challenge else None}
+                               "report": _safe_json_loads(r.report, {}), "challenge": _safe_json_loads(r.challenge)}
                               for r in revisions],
                 "decisions": [{"id": e.id, "actor": e.actor, "action": e.action,
-                               "occurred_at": e.occurred_at.isoformat(), "detail": json.loads(e.detail)} for e in events]}
+                               "occurred_at": e.occurred_at.isoformat(), "detail": _safe_json_loads(e.detail, {})} for e in events]}
 
 
 @app.get("/v1/scars/{scar_id_or_number}/revisions/{revision_id}/{artifact}")
@@ -181,8 +194,8 @@ def revision_artifact(scar_id_or_number: str, revision_id: str, artifact: str, _
         if scar is None or revision is None or revision.scar_id != scar.id:
             raise HTTPException(404, "Revision not found")
         if artifact == "tests":
-            return {"fixtures": json.loads(revision.fixtures), "report": json.loads(revision.report),
-                    "challenge": json.loads(revision.challenge) if revision.challenge else None}
+            return {"fixtures": _safe_json_loads(revision.fixtures, {}), "report": _safe_json_loads(revision.report, {}),
+                    "challenge": _safe_json_loads(revision.challenge)}
         rule = db.get(RuleVersion, revision.rule_id)
         if artifact == "rule" and rule:
             return {"rule_id": rule.id, "sha256": rule.sha256, "rule_yaml": rule.rule_yaml}
@@ -317,7 +330,7 @@ def audit(_: ApproverRequired, limit: int = 100) -> list[dict[str, Any]]:
                 "actor": row.actor,
                 "action": row.action,
                 "occurred_at": row.occurred_at.isoformat(),
-                "detail": json.loads(row.detail),
+                "detail": _safe_json_loads(row.detail, {}),
             }
             for row in rows
         ]

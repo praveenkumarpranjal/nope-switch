@@ -265,3 +265,69 @@ def test_challenge_misses_false_positives_and_author_fixture_reuse(client: TestC
     assert metrics["false_positives"] == 1
     assert metrics["passed"] is False
     assert approve(client, scar).status_code == 409
+
+
+def test_assurance_zero_division_safety() -> None:
+    from nope_core import assurance
+    from nope_core.rule_lab import CandidateResult
+
+    class FakeLab(RuleLab):
+        def validate(self, *args: Any, **kwargs: Any) -> CandidateResult:
+            return CandidateResult(True, {}, {}, [], [])
+
+    from nope_core.db import Revision, RuleVersion, SessionLocal
+    with SessionLocal() as db:
+        rule = RuleVersion(id="rule_test", scar_id="scar_test", version=1, sha256="test", rule_yaml="rules: []")
+        db.add(rule)
+        rev = Revision(
+            id="rev_test_zero",
+            scar_id="scar_test",
+            rule_id="rule_test",
+            sequence=1,
+            author="author1",
+            state="validated",
+            fixtures="{}",
+            report='{"quality_threshold": {"min_bad_examples": 1, "min_good_examples": 1, "min_detection_rate": 1.0, "max_false_positive_rate": 0.0}}',
+        )
+        db.add(rev)
+        db.commit()
+        empty_payload: dict[str, Any] = {
+            "bad_examples": [],
+            "good_examples": [],
+        }
+        # Calling with empty lists should not raise ZeroDivisionError
+        result = assurance.adversarial(db, rev, "diff_author", empty_payload, FakeLab())
+        assert result["detection_rate"] == 0.0
+        assert result["false_positive_rate"] == 0.0
+        assert result["passed"] is False
+
+
+def test_active_rules_yaml_ignores_non_semgrep_scars(client: TestClient) -> None:
+    from nope_core.db import Scar, SessionLocal, new_id
+    from nope_core.scar_service import generate_active_rules_yaml
+
+    with SessionLocal() as db:
+        # Create an active scar with CI enforcement (no semgrep revision)
+        non_semgrep_scar = Scar(
+            id=new_id("scar"),
+            number=999,
+            title="Non-semgrep CI policy",
+            incident_summary="Incident summary for test",
+            invariant="Must pass invariant",
+            rationale="Rationale",
+            remediation="Remediation",
+            repository="acme/service",
+            scope="src/",
+            severity="high",
+            enforcement="ci",
+            origin="INC-999",
+            proposed_by="devops",
+            status="active",
+            active=True,
+        )
+        db.add(non_semgrep_scar)
+        db.commit()
+
+        # generate_active_rules_yaml must not crash
+        yaml_output = generate_active_rules_yaml(db)
+        assert isinstance(yaml_output, str)

@@ -147,6 +147,21 @@ class ValidationJob(Base, TimestampMixin):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class Revision(Base, TimestampMixin):
+    __tablename__ = "scar_revisions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    scar_id: Mapped[str] = mapped_column(ForeignKey("scars.id", ondelete="CASCADE"), index=True, nullable=False)
+    rule_id: Mapped[str] = mapped_column(ForeignKey("rule_versions.id"), nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    author: Mapped[str] = mapped_column(String(200), nullable=False)
+    state: Mapped[str] = mapped_column(String(24), index=True, default="draft", nullable=False)
+    fixtures: Mapped[str] = mapped_column(Text, nullable=False)
+    report: Mapped[str] = mapped_column(Text, nullable=False)
+    adversary: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    challenge: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 _ensure_sqlite_parent(settings.database_url)
 connect_args = {"timeout": 30.0} if settings.database_url.startswith("sqlite") else {}
 engine = create_engine(settings.database_url, pool_pre_ping=True, future=True, connect_args=connect_args)
