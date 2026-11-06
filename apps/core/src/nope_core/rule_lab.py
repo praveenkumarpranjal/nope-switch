@@ -206,12 +206,6 @@ class RuleLab:
                     resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit, cpu_limit + 5))
                 except (ValueError, OSError):
                     pass
-                if hasattr(resource, "RLIMIT_AS"):
-                    try:
-                        mem_limit = 1_500_000_000
-                        resource.setrlimit(resource.RLIMIT_AS, (mem_limit, mem_limit))
-                    except (ValueError, OSError):
-                        pass
 
             try:
                 completed = subprocess.run(
@@ -241,7 +235,11 @@ class RuleLab:
                 return CandidateResult(False, {}, {}, [], [f"semgrep returned invalid JSON: {detail}"])
 
             if completed.returncode not in (0, 1):
-                return CandidateResult(False, {}, {}, [], [f"semgrep exited with status {completed.returncode}"])
+                detail = (completed.stderr or completed.stdout).strip()[:800]
+                error_msg = f"semgrep exited with status {completed.returncode}"
+                if detail:
+                    error_msg += f": {detail}"
+                return CandidateResult(False, {}, {}, [], [error_msg])
             if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
                 return CandidateResult(False, {}, {}, [], ["semgrep returned an incomplete scan report"])
 
