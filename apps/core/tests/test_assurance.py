@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import yaml
@@ -76,7 +76,7 @@ def validate(client: TestClient, scar: str, rule: str = RULE) -> dict[str, Any]:
         },
     )
     assert response.status_code == 200, response.text
-    return response.json()
+    return cast(dict[str, Any], response.json())
 
 
 def bundle(bad_count: int = 6, good_count: int = 4) -> dict[str, Any]:
