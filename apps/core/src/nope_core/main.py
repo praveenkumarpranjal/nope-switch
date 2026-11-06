@@ -12,12 +12,13 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
 from nope_core import scar_service
-from nope_core.auth import AgentRequired, ApproverRequired, CiRequired
+from nope_core.auth import AdminRequired, AgentRequired, ApproverRequired, CiRequired
 from nope_core.config import settings
-from nope_core.db import AuditEvent, Scar, SessionLocal, init_db, new_id
+from nope_core.db import AuditEvent, Scar, SessionLocal, WebhookDelivery, init_db, new_id
 from nope_core.rule_lab import RuleLab, RuleLabError
 from nope_core.schemas import (
     ApprovalRequest,
+    BreakGlassActivationRequest,
     ChallengeRequest,
     CreateScarRequest,
     ScarStatus,
@@ -123,13 +124,23 @@ def approve_scar(scar_id_or_number: str, payload: ApprovalRequest, actor: Approv
 
 
 @app.post("/v1/scars/{scar_id_or_number}/activate")
-def activate_scar(scar_id_or_number: str, actor: ApproverRequired) -> dict[str, Any]:
+def activate_scar(
+    scar_id_or_number: str,
+    payload: BreakGlassActivationRequest,
+    actor: AdminRequired,
+) -> dict[str, Any]:
+    """BREAK-GLASS ONLY: Manually activates a scar, bypassing standard GitOps PR merge.
+
+    Requires Admin permissions and an audited justification.
+    """
     with SessionLocal() as db:
         scar = _load_scar(db, scar_id_or_number)
         if not scar:
             raise HTTPException(status_code=404, detail="Scar not found")
         try:
-            scar = scar_service.activate_scar(db, scar, actor)
+            scar = scar_service.activate_scar_break_glass(
+                db, scar, actor, payload.authorized_by, payload.reason
+            )
             db.commit()
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -246,7 +257,14 @@ def _extract_scar_number_from_pr(pr_data: dict[str, Any]) -> int | None:
 
 @app.post("/v1/webhooks/github")
 async def github_webhook(request: Request) -> dict[str, Any]:
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > 1_048_576:
+        raise HTTPException(status_code=413, detail="Webhook payload exceeds 1MB limit")
+
     raw_body = await request.body()
+    if len(raw_body) > 1_048_576:
+        raise HTTPException(status_code=413, detail="Webhook payload exceeds 1MB limit")
+
     secret = os.getenv("GITHUB_WEBHOOK_SECRET") or settings.github_webhook_secret
     if not secret:
         if not settings.is_development:
@@ -255,6 +273,12 @@ async def github_webhook(request: Request) -> dict[str, Any]:
         sig_header = request.headers.get("X-Hub-Signature-256")
         if not _verify_github_signature(raw_body, sig_header, secret):
             raise HTTPException(status_code=401, detail="Invalid or missing GitHub signature")
+
+    delivery_id = request.headers.get("X-GitHub-Delivery")
+    if delivery_id:
+        with SessionLocal() as db:
+            if db.get(WebhookDelivery, delivery_id):
+                return {"status": "already_processed", "delivery_id": delivery_id}
 
     event = request.headers.get("X-GitHub-Event")
     if event == "ping":
@@ -275,6 +299,15 @@ async def github_webhook(request: Request) -> dict[str, Any]:
     if action != "closed" or pr.get("merged") is not True:
         return {"status": "ignored", "reason": "Pull request is not closed and merged"}
 
+    # Guard: Ensure PR was merged into the protected base branch
+    base_ref = pr.get("base", {}).get("ref")
+    expected_base = settings.base_ref.split("/")[-1]
+    if base_ref and base_ref != expected_base:
+        return {
+            "status": "ignored",
+            "reason": f"PR target branch '{base_ref}' does not match expected base branch '{expected_base}'",
+        }
+
     scar_number = _extract_scar_number_from_pr(pr)
     if scar_number is None:
         return {"status": "ignored", "reason": "No scar identifier found in PR metadata"}
@@ -284,11 +317,16 @@ async def github_webhook(request: Request) -> dict[str, Any]:
     head_ref = pr.get("head", {}).get("ref") or ""
 
     with SessionLocal() as db:
+        if delivery_id:
+            db.add(WebhookDelivery(id=delivery_id, event=event or "pull_request", status="processed"))
+
         scar = scar_service.get_scar_by_number(db, scar_number)
         if not scar:
+            db.commit()
             return {"status": "ignored", "reason": f"Scar #{scar_number} not found"}
 
         if scar.active:
+            db.commit()
             return {"status": "already_active", "scar_number": scar.number}
 
         if scar.status != ScarStatus.APPROVED.value:

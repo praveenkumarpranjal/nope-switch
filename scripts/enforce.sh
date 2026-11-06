@@ -15,6 +15,16 @@ if [ ! -f "$RULE_FILE" ]; then
   exit 2
 fi
 
+# Verify rules sync against nope-core ledger if service URL is provided or explicitly requested
+if [ "${NOPE_VERIFY_SYNC:-false}" = "true" ] || [ -n "${NOPE_BASE_URL:-}" ]; then
+  echo "NOPE: verifying rules sync against active ledger..."
+  if command -v uv >/dev/null; then
+    uv run nope verify-sync --rule-file "$RULE_FILE"
+  elif command -v nope >/dev/null; then
+    nope verify-sync --rule-file "$RULE_FILE"
+  fi
+fi
+
 if command -v semgrep >/dev/null; then
   run_semgrep() { semgrep "$@"; }
 elif command -v uv >/dev/null && uv run semgrep --version >/dev/null 2>&1; then

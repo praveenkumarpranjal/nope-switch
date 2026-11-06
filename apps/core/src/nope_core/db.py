@@ -124,6 +124,14 @@ class ScarCounter(Base):
     current_value: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
+class WebhookDelivery(Base, TimestampMixin):
+    __tablename__ = "webhook_deliveries"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    event: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
 _ensure_sqlite_parent(settings.database_url)
 connect_args = {"timeout": 30.0} if settings.database_url.startswith("sqlite") else {}
 engine = create_engine(settings.database_url, pool_pre_ping=True, future=True, connect_args=connect_args)

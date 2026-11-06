@@ -11,6 +11,7 @@ import yaml
 BASE_URL = os.getenv("NOPE_BASE_URL", "http://localhost:8010")
 DEFAULT_KEY = os.getenv("NOPE_AGENT_KEY", "agent-change-me")
 APPROVER_KEY = os.getenv("NOPE_APPROVER_KEY", "approver-change-me")
+ADMIN_KEY = os.getenv("NOPE_ADMIN_KEY", "admin-change-me")
 CI_KEY = os.getenv("NOPE_CI_KEY", "ci-change-me")
 
 
@@ -132,8 +133,10 @@ def main() -> None:
     approve.add_argument("--approver", required=True)
     approve.add_argument("--reason", required=True)
 
-    activate = sub.add_parser("activate")
+    activate = sub.add_parser("activate", help="BREAK-GLASS ONLY: Manually activate a scar bypassing GitOps PR merge")
     activate.add_argument("scar")
+    activate.add_argument("--authorized-by", required=True, help="Administrator identity authorizing break-glass")
+    activate.add_argument("--reason", required=True, help="Audited justification explaining why GitOps PR merge was bypassed")
 
     challenge = sub.add_parser("challenge", help="Request a narrowing or an expiring exception")
     challenge.add_argument("scar")
@@ -196,8 +199,11 @@ def main() -> None:
         with client(APPROVER_KEY) as session:
             dump(session.post(f"/v1/scars/{args.scar}/approve", json={"approver": args.approver, "reason": args.reason}))
     elif args.command == "activate":
-        with client(APPROVER_KEY) as session:
-            dump(session.post(f"/v1/scars/{args.scar}/activate"))
+        with client(ADMIN_KEY) as session:
+            dump(session.post(f"/v1/scars/{args.scar}/activate", json={
+                "authorized_by": args.authorized_by,
+                "reason": args.reason,
+            }))
     elif args.command == "challenge":
         body = {
             "challenger": args.requester,

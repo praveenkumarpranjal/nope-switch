@@ -68,6 +68,13 @@ class ApprovalRequest(BaseModel):
     reason: str = Field(min_length=8, max_length=2000)
 
 
+class BreakGlassActivationRequest(BaseModel):
+    reason: str = Field(
+        min_length=10, max_length=2000, description="Mandatory rationale explaining why GitOps PR merge was bypassed"
+    )
+    authorized_by: str = Field(min_length=2, max_length=200, description="Authorized administrator identity")
+
+
 class ChallengeRequest(BaseModel):
     challenger: str = Field(min_length=2, max_length=200)
     reason: str = Field(min_length=12, max_length=4000)

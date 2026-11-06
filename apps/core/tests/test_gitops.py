@@ -330,9 +330,13 @@ def test_active_rules_yaml_endpoint() -> None:
         empty_doc = yaml.safe_load(empty_resp.text)
         assert empty_doc == {"rules": []}
 
-        # Create, validate, and activate a scar
+        # Create, validate, and activate a scar via break-glass admin route
         scar = _create_approved_scar(client)
-        act_resp = client.post(f"/v1/scars/{scar['id']}/activate", headers={"X-NOPE-Key": "approver"})
+        act_resp = client.post(
+            f"/v1/scars/{scar['id']}/activate",
+            headers={"X-NOPE-Key": "admin"},
+            json={"authorized_by": "sec-admin", "reason": "Authorized break-glass activation for test setup"},
+        )
         assert act_resp.status_code == 200
 
         # Now GET /v1/rules/active.yml returns the rule
@@ -352,7 +356,11 @@ def test_cli_rule_sync_and_verify_roundtrip(tmp_path: Path) -> None:
     # Set up in-process database state with an active rule
     with TestClient(app) as client:
         scar = _create_approved_scar(client)
-        client.post(f"/v1/scars/{scar['id']}/activate", headers={"X-NOPE-Key": "approver"})
+        client.post(
+            f"/v1/scars/{scar['id']}/activate",
+            headers={"X-NOPE-Key": "admin"},
+            json={"authorized_by": "sec-admin", "reason": "Authorized break-glass activation for CLI sync test"},
+        )
 
         with SessionLocal() as db:
             active_scars = list(db.scalars(select(Scar).where(Scar.active.is_(True))).all())
@@ -410,3 +418,75 @@ def test_cli_rule_sync_and_verify_roundtrip(tmp_path: Path) -> None:
         assert verify_rules_sync(non_existent, base_url="http://testserver", key="ci") == 1
     finally:
         monkeypatch_client.undo()
+
+
+def test_webhook_delivery_idempotency() -> None:
+    with TestClient(app) as client:
+        scar = _create_approved_scar(client)
+        delivery_id = "77d2429a-d8cb-4f35-8664-d4b3df36c572"
+        pr_payload = {
+            "action": "closed",
+            "pull_request": {
+                "number": 105,
+                "merged": True,
+                "merge_commit_sha": "eeeeffff11112222333344445555666677778888",
+                "merged_by": {"login": "ci-bot"},
+                "head": {"ref": f"nope/scar-{scar['number']}"},
+            },
+        }
+        resp1 = client.post(
+            "/v1/webhooks/github",
+            headers={"X-GitHub-Event": "pull_request", "X-GitHub-Delivery": delivery_id},
+            json=pr_payload,
+        )
+        assert resp1.status_code == 200
+        assert resp1.json()["status"] == "activated"
+
+        resp2 = client.post(
+            "/v1/webhooks/github",
+            headers={"X-GitHub-Event": "pull_request", "X-GitHub-Delivery": delivery_id},
+            json=pr_payload,
+        )
+        assert resp2.status_code == 200
+        assert resp2.json()["status"] == "already_processed"
+        assert resp2.json()["delivery_id"] == delivery_id
+
+
+def test_webhook_payload_size_limit() -> None:
+    with TestClient(app) as client:
+        huge_payload = "a" * (1_048_576 + 10)
+        resp = client.post(
+            "/v1/webhooks/github",
+            headers={"X-GitHub-Event": "pull_request"},
+            content=huge_payload.encode("utf-8"),
+        )
+        assert resp.status_code == 413
+        assert "Webhook payload exceeds 1MB limit" in resp.json()["detail"]
+
+
+def test_webhook_target_branch_filtering() -> None:
+    with TestClient(app) as client:
+        scar = _create_approved_scar(client)
+        pr_payload = {
+            "action": "closed",
+            "pull_request": {
+                "number": 106,
+                "merged": True,
+                "merge_commit_sha": "3333444455556666777788889999000011112222",
+                "merged_by": {"login": "dev1"},
+                "head": {"ref": f"nope/scar-{scar['number']}"},
+                "base": {"ref": "feature-branch"},
+            },
+        }
+        resp = client.post(
+            "/v1/webhooks/github",
+            headers={"X-GitHub-Event": "pull_request"},
+            json=pr_payload,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ignored"
+        assert "does not match expected base branch" in resp.json()["reason"]
+
+        scar_check = client.get(f"/v1/scars/{scar['id']}", headers={"X-NOPE-Key": "agent"})
+        assert scar_check.json()["status"] == ScarStatus.APPROVED.value
+        assert scar_check.json()["active"] is False

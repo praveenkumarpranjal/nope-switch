@@ -75,12 +75,21 @@ def get_next_scar_number(db: Session) -> int:
         .returning(ScarCounter.current_value)
     )
     val = db.scalar(stmt)
-    if val is None:
-        max_num = db.scalar(select(func.coalesce(func.max(Scar.number), 0))) or 0
-        allocated = int(max_num) + 1
-        db.add(ScarCounter(name="scars", current_value=allocated))
-        return allocated
-    return int(val)
+    if val is not None:
+        return int(val)
+
+    max_num = db.scalar(select(func.coalesce(func.max(Scar.number), 0))) or 0
+    allocated = int(max_num) + 1
+    try:
+        with db.begin_nested():
+            db.add(ScarCounter(name="scars", current_value=allocated))
+            db.flush()
+            return allocated
+    except Exception:
+        val = db.scalar(stmt)
+        if val is not None:
+            return int(val)
+        raise RuntimeError("Failed to allocate atomic scar number") from None
 
 
 def create_scar(db: Session, payload: CreateScarRequest, actor: str) -> Scar:
@@ -155,6 +164,25 @@ def activate_scar(db: Session, scar: Scar, actor: str) -> Scar:
     scar.status = ScarStatus.ACTIVE.value
     scar.active = True
     _audit(db, actor, "scar.activated", {"approved_by": scar.approved_by}, scar.id)
+    return scar
+
+
+def activate_scar_break_glass(db: Session, scar: Scar, actor: str, authorized_by: str, reason: str) -> Scar:
+    if scar.status != ScarStatus.APPROVED.value:
+        raise ValueError("Only an approved scar can be activated")
+    scar.status = ScarStatus.ACTIVE.value
+    scar.active = True
+    _audit(
+        db,
+        actor,
+        "scar.activated_break_glass",
+        {
+            "warning": "BREAK-GLASS MANUAL ACTIVATION BYPASSING GITOPS PR MERGE",
+            "authorized_by": authorized_by,
+            "reason": reason,
+        },
+        scar.id,
+    )
     return scar
 
 
