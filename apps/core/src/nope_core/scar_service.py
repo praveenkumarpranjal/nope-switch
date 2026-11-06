@@ -5,7 +5,16 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from nope_core.db import AuditEvent, ExceptionRecord, RuleVersion, Scar, ValidationRun, new_id
+import yaml
+from nope_core.db import (
+    AuditEvent,
+    ExceptionRecord,
+    RuleVersion,
+    Scar,
+    ScarCounter,
+    ValidationRun,
+    new_id,
+)
 from nope_core.db import RuleVersion as RuleVersionModel
 from nope_core.rule_lab import CandidateResult
 from nope_core.schemas import (
@@ -14,7 +23,7 @@ from nope_core.schemas import (
     ScarResponse,
     ScarStatus,
 )
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 
@@ -58,13 +67,29 @@ def list_scars(db: Session) -> list[Scar]:
     return list(db.scalars(select(Scar).order_by(Scar.number.desc())).all())
 
 
+def get_next_scar_number(db: Session) -> int:
+    stmt = (
+        update(ScarCounter)
+        .where(ScarCounter.name == "scars")
+        .values(current_value=ScarCounter.current_value + 1)
+        .returning(ScarCounter.current_value)
+    )
+    val = db.scalar(stmt)
+    if val is None:
+        max_num = db.scalar(select(func.coalesce(func.max(Scar.number), 0))) or 0
+        allocated = int(max_num) + 1
+        db.add(ScarCounter(name="scars", current_value=allocated))
+        return allocated
+    return int(val)
+
+
 def create_scar(db: Session, payload: CreateScarRequest, actor: str) -> Scar:
     with db.begin():
-        next_number = db.scalar(select(func.coalesce(func.max(Scar.number), 0) + 1))
+        next_number = get_next_scar_number(db)
         incident_url = str(payload.incident_url) if payload.incident_url else None
         scar = Scar(
             id=new_id("scar"),
-            number=int(next_number or 1),
+            number=next_number,
             title=payload.title,
             incident_summary=payload.incident_summary,
             invariant=payload.invariant,
@@ -150,3 +175,37 @@ def challenge_scar(db: Session, scar: Scar, actor: str, payload: ChallengeReques
         detail["proposed_rule_sha256"] = hashlib.sha256(payload.proposed_rule_yaml.encode()).hexdigest()
     _audit(db, actor, "scar.challenged", detail, scar.id)
     return record
+
+
+def generate_active_rules_yaml(db: Session) -> str:
+    scars = list(db.scalars(select(Scar).where(Scar.active.is_(True)).order_by(Scar.number.asc())).all())
+    merged_rules: list[dict[str, Any]] = []
+    for scar in scars:
+        latest_rule_version = db.scalar(
+            select(RuleVersionModel)
+            .where(RuleVersionModel.scar_id == scar.id)
+            .order_by(RuleVersionModel.version.desc())
+            .limit(1)
+        )
+        if not latest_rule_version or not latest_rule_version.rule_yaml.strip():
+            continue
+        try:
+            doc = yaml.safe_load(latest_rule_version.rule_yaml)
+        except Exception:
+            continue
+        rules: list[Any] = []
+        if isinstance(doc, dict) and "rules" in doc and isinstance(doc["rules"], list):
+            rules = doc["rules"]
+        elif isinstance(doc, list):
+            rules = doc
+        elif isinstance(doc, dict):
+            rules = [doc]
+        for rule in rules:
+            if isinstance(rule, dict):
+                rule_copy = dict(rule)
+                metadata = rule_copy.setdefault("metadata", {})
+                if isinstance(metadata, dict) and "scar" not in metadata:
+                    metadata["scar"] = f"SCAR-{scar.number:03d}"
+                merged_rules.append(rule_copy)
+    return yaml.safe_dump({"rules": merged_rules}, sort_keys=False)
+

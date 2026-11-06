@@ -43,7 +43,9 @@ def test_workflow_command_escaping() -> None:
     assert escape_data(raw_msg) == "Critical:%0ADo not log tokens, secret%25100"
 
 
-def test_workflow_command_output_captured(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_workflow_command_output_captured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     scan_file = tmp_path / "findings.json"
     scan_file.write_text(
@@ -74,7 +76,7 @@ def test_workflow_command_output_captured(tmp_path: Path, monkeypatch, capsys) -
     assert expected_command in captured.out
 
 
-def test_get_git_info_and_check_url(monkeypatch) -> None:
+def test_get_git_info_and_check_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GITHUB_REPOSITORY", "org/test-repo")
     monkeypatch.setenv("GITHUB_SHA", "abcdef1234567")
     monkeypatch.setenv("GITHUB_RUN_ID", "998877")
@@ -105,7 +107,9 @@ def test_process_scan_file_invalid_json(tmp_path: Path) -> None:
     assert process_scan_file(scan_file) == 1
 
 
-def test_process_scan_file_semgrep_errors_fail_closed(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_process_scan_file_semgrep_errors_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     scan_file = tmp_path / "semgrep_errors.json"
     scan_file.write_text(
         json.dumps({
@@ -142,7 +146,9 @@ def test_process_scan_file_semgrep_errors_fail_open(tmp_path: Path) -> None:
     assert exit_code == 0
 
 
-def test_process_scan_file_both_results_and_errors(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_process_scan_file_both_results_and_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     scan_file = tmp_path / "mixed.json"
     scan_file.write_text(
         json.dumps({
@@ -259,7 +265,7 @@ def test_step_summary_table_escaping(tmp_path: Path) -> None:
 def test_live_server_integration_records_failure_and_returns_remediation(
     live_server: str,
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real HTTP socket integration test:
 

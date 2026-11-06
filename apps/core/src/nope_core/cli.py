@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import httpx
+import yaml
 
 BASE_URL = os.getenv("NOPE_BASE_URL", "http://localhost:8010")
 DEFAULT_KEY = os.getenv("NOPE_AGENT_KEY", "agent-change-me")
@@ -40,6 +41,70 @@ def parse_examples(values: list[str]) -> list[dict[str, str]]:
         name, path = value.split("=", 1)
         examples.append({"name": name, "content": read_structured_file(Path(path))})
     return examples
+
+
+def verify_rules_sync(rule_file: Path, base_url: str | None = None, key: str | None = None) -> int:
+    target_url = (base_url or BASE_URL).rstrip("/") + "/v1/rules/active.yml"
+    headers = {"X-NOPE-Key": key or CI_KEY}
+    with httpx.Client(timeout=30) as http_client:
+        try:
+            resp = http_client.get(target_url, headers=headers)
+            resp.raise_for_status()
+        except Exception as exc:
+            print(f"NOPE: Failed to fetch active rules from {target_url}: {exc}")
+            return 1
+        remote_yaml_str = resp.text
+
+    if not rule_file.is_file():
+        print(f"NOPE: Local rule file '{rule_file}' does not exist.")
+        return 1
+
+    local_yaml_str = rule_file.read_text(encoding="utf-8")
+    try:
+        remote_doc = yaml.safe_load(remote_yaml_str) or {}
+        local_doc = yaml.safe_load(local_yaml_str) or {}
+    except Exception as exc:
+        print(f"NOPE: YAML parsing error: {exc}")
+        return 1
+
+    remote_rules = remote_doc.get("rules", []) if isinstance(remote_doc, dict) else []
+    local_rules = local_doc.get("rules", []) if isinstance(local_doc, dict) else []
+
+    if remote_rules == local_rules:
+        print(f"NOPE: Rule file '{rule_file}' is in sync with active rules ({len(local_rules)} rules).")
+        return 0
+
+    print(f"NOPE: Drift detected between '{rule_file}' and database active rules!")
+    remote_ids = {r.get("id") for r in remote_rules if isinstance(r, dict)}
+    local_ids = {r.get("id") for r in local_rules if isinstance(local_doc, dict) and isinstance(r, dict)}
+
+    missing_in_local = remote_ids - local_ids
+    extra_in_local = local_ids - remote_ids
+    if missing_in_local:
+        print(f"  Missing locally (active in DB): {sorted(str(i) for i in missing_in_local)}")
+    if extra_in_local:
+        print(f"  Extra locally (not active in DB): {sorted(str(i) for i in extra_in_local)}")
+    if not missing_in_local and not extra_in_local:
+        print("  Rule IDs match but rule definitions or metadata differ.")
+    return 1
+
+
+def sync_rules_to_file(output_path: Path, base_url: str | None = None, key: str | None = None) -> int:
+    target_url = (base_url or BASE_URL).rstrip("/") + "/v1/rules/active.yml"
+    headers = {"X-NOPE-Key": key or CI_KEY}
+    with httpx.Client(timeout=30) as http_client:
+        try:
+            resp = http_client.get(target_url, headers=headers)
+            resp.raise_for_status()
+        except Exception as exc:
+            print(f"NOPE: Failed to fetch active rules from {target_url}: {exc}")
+            return 1
+        remote_yaml_str = resp.text
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(remote_yaml_str, encoding="utf-8")
+    print(f"NOPE: Successfully synced active rules to '{output_path}'.")
+    return 0
 
 
 def main() -> None:
@@ -94,6 +159,16 @@ def main() -> None:
         default=os.getenv("NOPE_FAIL_CLOSED", "true").lower() == "true",
         help="Fail build on rule violations even if nope-core API is unreachable",
     )
+
+    verify_sync = sub.add_parser("verify-sync", help="Verify local Semgrep rules are in sync with active database rules")
+    verify_sync.add_argument("--rule-file", type=Path, default=Path("config/.semgrep/nope-active.yml"), help="Path to local rules YAML")
+    verify_sync.add_argument("--base-url", default=None, help="Base URL of nope-core service")
+    verify_sync.add_argument("--ci-key", default=None, help="API key for nope-core")
+
+    sync_rules = sub.add_parser("sync-rules", help="Sync active rules from nope-core into local Semgrep rules file")
+    sync_rules.add_argument("--output", type=Path, default=Path("config/.semgrep/nope-active.yml"), help="Destination path for active rules YAML")
+    sync_rules.add_argument("--base-url", default=None, help="Base URL of nope-core service")
+    sync_rules.add_argument("--ci-key", default=None, help="API key for nope-core")
 
     args = parser.parse_args()
     if args.command == "health":
@@ -150,6 +225,12 @@ def main() -> None:
             ci_key=args.ci_key,
             fail_closed=args.fail_closed,
         )
+        raise SystemExit(code)
+    elif args.command == "verify-sync":
+        code = verify_rules_sync(rule_file=args.rule_file, base_url=args.base_url, key=args.ci_key)
+        raise SystemExit(code)
+    elif args.command == "sync-rules":
+        code = sync_rules_to_file(output_path=args.output, base_url=args.base_url, key=args.ci_key)
         raise SystemExit(code)
 
 if __name__ == "__main__":

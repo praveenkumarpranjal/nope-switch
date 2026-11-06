@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import concurrent.futures
+from typing import Any, cast
+
 from fastapi.testclient import TestClient
 from nope_core.db import Base, engine
 from nope_core.main import app
@@ -44,3 +47,32 @@ def test_create_then_show_scar() -> None:
         listed = client.get(f"/v1/scars/{scar_id}", headers={"X-NOPE-Key": "agent"})
         assert listed.status_code == 200
         assert listed.json()["origin"] == "INC-014"
+
+
+def test_concurrent_create_scar_assigns_unique_contiguous_numbers() -> None:
+    def post_scar(idx: int) -> dict[str, Any]:
+        payload = {
+            "title": f"Concurrent Scar Policy Rule #{idx}",
+            "incident_summary": f"Incident summary for concurrency test #{idx}",
+            "invariant": f"Invariant rule requirement #{idx}",
+            "rationale": f"Rationale for concurrency test #{idx}",
+            "remediation": f"Remediation steps for policy #{idx}",
+            "repository": "acme/payments",
+            "scope": "src/",
+            "severity": "high",
+            "enforcement": "semgrep",
+            "origin": f"INC-TEST-{idx:03d}",
+            "proposed_by": f"thread-{idx}",
+        }
+        with TestClient(app) as client:
+            resp = client.post("/v1/scars", headers={"X-NOPE-Key": "agent"}, json=payload)
+            assert resp.status_code == 201
+            return cast(dict[str, Any], resp.json())
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        results = list(executor.map(post_scar, range(1, 11)))
+
+    numbers = [int(r["number"]) for r in results]
+    assert len(numbers) == 10
+    assert len(set(numbers)) == 10
+    assert sorted(numbers) == list(range(1, 11))

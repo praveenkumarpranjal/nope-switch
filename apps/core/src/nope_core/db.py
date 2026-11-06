@@ -13,6 +13,7 @@ from sqlalchemy import (
     Text,
     create_engine,
     func,
+    select,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
@@ -116,14 +117,30 @@ class AuditEvent(Base):
     scar: Mapped[Scar | None] = relationship(back_populates="events")
 
 
+class ScarCounter(Base):
+    __tablename__ = "scar_counters"
+
+    name: Mapped[str] = mapped_column(String(32), primary_key=True)
+    current_value: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
 _ensure_sqlite_parent(settings.database_url)
-engine = create_engine(settings.database_url, pool_pre_ping=True, future=True)
+connect_args = {"timeout": 30.0} if settings.database_url.startswith("sqlite") else {}
+engine = create_engine(settings.database_url, pool_pre_ping=True, future=True, connect_args=connect_args)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 
 def init_db() -> None:
-    """Create the local SQLite schema; production runs Alembic migrations first."""
+    """Create the local schema and seed the atomic sequence counter if missing."""
     Base.metadata.create_all(bind=engine)
+    with SessionLocal() as db:
+        if not db.get(ScarCounter, "scars"):
+            max_num = db.scalar(select(func.coalesce(func.max(Scar.number), 0))) or 0
+            db.add(ScarCounter(name="scars", current_value=int(max_num)))
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
 
 
 def new_id(prefix: str) -> str:
