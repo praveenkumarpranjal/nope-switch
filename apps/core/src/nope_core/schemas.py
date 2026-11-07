@@ -28,6 +28,13 @@ class ScarStatus(StrEnum):
     CHALLENGED = "challenged"
 
 
+class RoomMessageSource(BaseModel):
+    room_id: str = Field(min_length=1, max_length=400)
+    message_id: str = Field(min_length=1, max_length=400)
+    author_id: str = Field(min_length=1, max_length=400)
+    author_name: str = Field(min_length=1, max_length=200)
+
+
 class CreateScarRequest(BaseModel):
     title: str = Field(min_length=8, max_length=160)
     incident_summary: str = Field(min_length=12, max_length=4000)
@@ -35,12 +42,14 @@ class CreateScarRequest(BaseModel):
     rationale: str = Field(min_length=8, max_length=4000)
     remediation: str = Field(min_length=8, max_length=4000)
     incident_url: HttpUrl | None = None
+    teach_message_url: HttpUrl | None = None
     repository: str = Field(min_length=2, max_length=200)
     scope: str = Field(min_length=2, max_length=200)
     severity: Severity = Severity.HIGH
     enforcement: Enforcement = Enforcement.SEMGREP
     origin: str = Field(min_length=2, max_length=400)
     proposed_by: str = Field(min_length=2, max_length=200)
+    source_message: RoomMessageSource | None = None
 
     @field_validator("title", "incident_summary", "invariant", "rationale", "remediation", "origin", "proposed_by")
     @classmethod
@@ -94,6 +103,18 @@ class ApprovalRequest(BaseModel):
     reason: str = Field(min_length=8, max_length=2000)
 
 
+class ApprovalProposalRequest(BaseModel):
+    revision_id: str = Field(min_length=1, max_length=64)
+
+
+class ApprovalDecisionRequest(ApprovalRequest):
+    request_id: str = Field(min_length=1, max_length=64)
+    revision_id: str = Field(min_length=1, max_length=64)
+    evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    repository: str = Field(min_length=2, max_length=200)
+    scope: str = Field(min_length=2, max_length=200)
+
+
 class BreakGlassActivationRequest(BaseModel):
     reason: str = Field(
         min_length=10, max_length=2000, description="Mandatory rationale explaining why GitOps PR merge was bypassed"
@@ -102,6 +123,7 @@ class BreakGlassActivationRequest(BaseModel):
 
 
 class ChallengeRequest(BaseModel):
+    source_message: RoomMessageSource | None = None
     challenger: str = Field(min_length=2, max_length=200)
     reason: str = Field(min_length=12, max_length=4000)
     requested_by: str = Field(min_length=2, max_length=200)

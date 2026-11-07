@@ -76,7 +76,9 @@ def validate(client: TestClient, scar: str, rule: str = RULE) -> dict[str, Any]:
         },
     )
     assert response.status_code == 200, response.text
-    return response.json()
+    payload = response.json()
+    assert isinstance(payload, dict)
+    return payload
 
 
 def bundle(bad_count: int = 6, good_count: int = 4) -> dict[str, Any]:
@@ -92,10 +94,15 @@ def bundle(bad_count: int = 6, good_count: int = 4) -> dict[str, Any]:
 
 
 def approve(client: TestClient, scar: str) -> Any:
+    evidence = client.get(f"/v1/scars/{scar}/provenance", headers=AGENT).json()
+    revisions = evidence["revisions"]
+    requested = client.post(f"/v1/scars/{scar}/approval-request", headers=AGENT,
+                            json={"revision_id": revisions[-1]["id"] if revisions else "missing"})
+    if requested.status_code != 200:
+        return requested
     return client.post(
-        f"/v1/scars/{scar}/approve",
-        headers=APPROVER,
-        json={"approver": "reviewer", "reason": "Reviewed replay and independent evidence"},
+        f"/v1/scars/{scar}/approve", headers=APPROVER,
+        json={**requested.json(), "approver": "reviewer", "reason": "Reviewed replay and independent evidence"},
     )
 
 
@@ -104,6 +111,98 @@ def activate(client: TestClient, scar: str) -> None:
     response = client.post(f"/v1/scars/{scar}/activate", headers={"X-NOPE-Key": "admin"},
                            json={"authorized_by": "test-administrator", "reason": "Activate verified test revision through reviewed manual path"})
     assert response.status_code == 200, response.text
+
+
+def decision(client: TestClient, scar: str, revision_id: str) -> dict[str, Any]:
+    requested = client.post(f"/v1/scars/{scar}/approval-request", headers=AGENT,
+                            json={"revision_id": revision_id})
+    assert requested.status_code == 200, requested.text
+    return {**requested.json(), "approver": "Security approver",
+            "reason": "Reviewed the exact incident replay and independent challenge"}
+
+
+@pytest.mark.parametrize("field,value", [
+    ("revision_id", "rev-another-candidate"), ("evidence_sha256", "0" * 64),
+    ("repository", "another/repository"), ("scope", "other/"),
+    ("request_id", "approval-invented"),
+])
+def test_bound_approval_rejects_substitution(client: TestClient, field: str, value: str) -> None:
+    scar = create(client)
+    revision = validate(client, scar)["revision_id"]
+    assert client.post(f"/v1/scars/{scar}/adversarial", headers=ADVERSARY, json=bundle()).json()["passed"]
+    payload = decision(client, scar, revision)
+    payload[field] = value
+    rejected = client.post(f"/v1/scars/{scar}/approve", headers=APPROVER, json=payload)
+    assert rejected.status_code == 409, rejected.text
+    assert client.get(f"/v1/scars/{scar}", headers=AGENT).json()["status"] == "validated"
+
+
+def test_exact_human_role_approval_and_replay_rejection(client: TestClient) -> None:
+    scar = create(client)
+    revision = validate(client, scar)["revision_id"]
+    client.post(f"/v1/scars/{scar}/adversarial", headers=ADVERSARY, json=bundle())
+    payload = decision(client, scar, revision)
+    assert client.post(f"/v1/scars/{scar}/approve", headers=AGENT, json=payload).status_code == 403
+    assert client.post(f"/v1/scars/{scar}/approve", json=payload).status_code == 401
+    assert client.post(f"/v1/scars/{scar}/approve", headers=APPROVER,
+                       json={"approver": "Security", "reason": "Approved in a chat message"}).status_code == 422
+    accepted = client.post(f"/v1/scars/{scar}/approve", headers=APPROVER, json=payload)
+    assert accepted.status_code == 200, accepted.text
+    assert client.post(f"/v1/scars/{scar}/approve", headers=APPROVER, json=payload).status_code == 409
+    events = client.get(f"/v1/scars/{scar}/provenance", headers=AGENT).json()["decisions"]
+    approved = next(e for e in events if e["action"] == "scar.approved")
+    assert approved["actor"].startswith("api-key:approver:")
+    assert approved["detail"]["evidence_sha256"] == payload["evidence_sha256"]
+
+
+def test_new_validation_invalidates_previous_approval_request(client: TestClient) -> None:
+    scar = create(client)
+    revision = validate(client, scar)["revision_id"]
+    client.post(f"/v1/scars/{scar}/adversarial", headers=ADVERSARY, json=bundle())
+    payload = decision(client, scar, revision)
+    validate(client, scar)
+    client.post(f"/v1/scars/{scar}/adversarial", headers=ADVERSARY, json=bundle())
+    rejected = client.post(f"/v1/scars/{scar}/approve", headers=APPROVER, json=payload)
+    assert rejected.status_code == 409 and "revision_id" in rejected.text
+
+
+def test_expired_approval_request_is_rejected(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from nope_core import approvals
+
+    scar = create(client)
+    revision = validate(client, scar)["revision_id"]
+    client.post(f"/v1/scars/{scar}/adversarial", headers=ADVERSARY, json=bundle())
+    payload = decision(client, scar, revision)
+    future = datetime.now(UTC) + timedelta(days=2)
+
+    class FutureClock(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> FutureClock:
+            return cls.fromtimestamp(future.timestamp(), tz or UTC)
+
+    monkeypatch.setattr(approvals, "datetime", FutureClock)
+    rejected = client.post(f"/v1/scars/{scar}/approve", headers=APPROVER, json=payload)
+    assert rejected.status_code == 409 and "expired" in rejected.text
+
+
+def test_activation_rechecks_approved_scope(client: TestClient) -> None:
+    from nope_core.db import Scar, SessionLocal
+    from sqlalchemy import select
+
+    scar = create(client)
+    validate(client, scar)
+    client.post(f"/v1/scars/{scar}/adversarial", headers=ADVERSARY, json=bundle())
+    assert approve(client, scar).status_code == 200
+    with SessionLocal() as db:
+        stored = db.scalar(select(Scar).where(Scar.number == int(scar)))
+        assert stored is not None
+        stored.scope = "changed/"
+        db.commit()
+    rejected = client.post(f"/v1/scars/{scar}/activate", headers=ADVERSARY,
+                           json={"authorized_by": "admin", "reason": "Review exact evidence before activating"})
+    assert rejected.status_code == 409 and "evidence hash" in rejected.text
 
 
 def test_replay_and_separate_agent_are_required(client: TestClient) -> None:

@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import yaml
-from nope_core import assurance
+from nope_core import approvals, assurance
 from nope_core.db import (
     AuditEvent,
     ExceptionRecord,
@@ -19,6 +19,7 @@ from nope_core.db import (
 from nope_core.db import RuleVersion as RuleVersionModel
 from nope_core.rule_lab import CandidateResult
 from nope_core.schemas import (
+    ApprovalDecisionRequest,
     ChallengeRequest,
     CreateScarRequest,
     ScarResponse,
@@ -149,15 +150,20 @@ def record_validation(db: Session, scar: Scar, actor: str, result: CandidateResu
     }, scar.id)
 
 
-def approve_scar(db: Session, scar: Scar, actor: str, approver: str, reason: str) -> Scar:
+def approve_scar(db: Session, scar: Scar, actor: str, payload: ApprovalDecisionRequest) -> Scar:
     if scar.status != ScarStatus.VALIDATED.value:
         raise ValueError("Only a validated scar can be approved")
-    revision = assurance.require_quality(assurance.latest(db, scar))
+    revision = approvals.verify(db, scar, payload)
+    # Claim the transition atomically so concurrent approval requests cannot both win.
+    claimed = db.execute(update(Scar).where(Scar.id == scar.id, Scar.status == "validated")
+                         .values(status="approved"))
+    if claimed.rowcount != 1:  # type: ignore[attr-defined]
+        raise ValueError("Candidate is no longer awaiting approval")
     revision.state = "approved"
     scar.status = ScarStatus.APPROVED.value
-    scar.approved_by = approver
-    scar.approved_reason = reason
-    _audit(db, actor, "scar.approved", {"approver": approver, "reason": reason, "revision_id": revision.id, "rule_id": revision.rule_id}, scar.id)
+    scar.approved_by = payload.approver
+    scar.approved_reason = payload.reason
+    _audit(db, actor, "scar.approved", {**payload.model_dump(), "rule_id": revision.rule_id}, scar.id)
     return scar
 
 
@@ -167,6 +173,7 @@ def activate_scar(db: Session, scar: Scar, actor: str) -> Scar:
     revision = assurance.latest(db, scar)
     if revision is None or revision.state != "approved":
         raise ValueError("The latest revision must be approved before activation")
+    approvals.verify_approved(db, scar, revision)
     previous = assurance.active(db, scar)
     if previous is not None:
         previous.state = "superseded"
@@ -185,6 +192,7 @@ def activate_scar_break_glass(db: Session, scar: Scar, actor: str, authorized_by
     revision = assurance.latest(db, scar)
     if revision is None or revision.state != "approved":
         raise ValueError("The latest revision must be approved before activation")
+    approvals.verify_approved(db, scar, revision)
     previous = assurance.active(db, scar)
     if previous is not None:
         previous.state = "superseded"

@@ -142,10 +142,15 @@ def main() -> None:
     reject.add_argument("--approver", required=True)
     reject.add_argument("--reason", required=True)
 
+    request = sub.add_parser("request-approval", help="Record an exact evidence-bound approval request")
+    request.add_argument("scar")
+    request.add_argument("--revision", required=True)
+
     approve = sub.add_parser("approve")
     approve.add_argument("scar")
     approve.add_argument("--approver", required=True)
     approve.add_argument("--reason", required=True)
+    approve.add_argument("--request", type=Path, required=True, help="Exact approval-request JSON reviewed by the human")
 
     activate = sub.add_parser("activate", help="BREAK-GLASS ONLY: Manually activate a scar bypassing GitOps PR merge")
     activate.add_argument("scar")
@@ -221,9 +226,12 @@ def main() -> None:
     elif args.command == "reject":
         with client(APPROVER_KEY) as session:
             dump(session.post(f"/v1/scars/{args.scar}/reject", json={"approver": args.approver, "reason": args.reason}))
+    elif args.command == "request-approval":
+        with client() as session:
+            dump(session.post(f"/v1/scars/{args.scar}/approval-request", json={"revision_id": args.revision}))
     elif args.command == "approve":
         with client(APPROVER_KEY) as session:
-            dump(session.post(f"/v1/scars/{args.scar}/approve", json={"approver": args.approver, "reason": args.reason}))
+            dump(session.post(f"/v1/scars/{args.scar}/approve", json={**json.loads(args.request.read_text(encoding="utf-8-sig")), "approver": args.approver, "reason": args.reason}))
     elif args.command == "activate":
         with client(ADMIN_KEY) as session:
             dump(session.post(f"/v1/scars/{args.scar}/activate", json={

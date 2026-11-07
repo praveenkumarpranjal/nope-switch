@@ -2,7 +2,7 @@ name: NOPE CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'nope/**']
   pull_request:
 
 concurrency:
@@ -35,18 +35,24 @@ jobs:
           uv sync --extra dev --extra semgrep
           uv run ruff check .
           uv run mypy -p nope_core
+          uv run mypy apps/switch/src/nope_switch
           uv run mypy apps/core/tests
           uv run pytest
 
       - name: Counterfactual replay and independent Scar challenge
         run: uv run python scripts/check_assurance.py
 
+      - name: Naive-versus-taint Rule Lab comparison (offline Switch context)
+        run: uv run nope-room courtroom
+
       - name: Preserve Scar test evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: scar-assurance-report
-          path: .data/assurance-report.json
+          path: |
+            .data/assurance-report.json
+            .data/courtroom.json
 
       - name: Target service checks
         run: |

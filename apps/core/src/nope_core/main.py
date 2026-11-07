@@ -11,7 +11,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse
-from nope_core import assurance, scar_service
+from nope_core import approvals, assurance, scar_service
 from nope_core.auth import AdminRequired, AgentRequired, ApproverRequired, CiRequired
 from nope_core.config import settings
 from nope_core.db import (
@@ -26,6 +26,8 @@ from nope_core.db import (
 from nope_core.rule_lab import RuleLab, RuleLabError
 from nope_core.schemas import (
     AdversarialRequest,
+    ApprovalDecisionRequest,
+    ApprovalProposalRequest,
     ApprovalRequest,
     BreakGlassActivationRequest,
     ChallengeRequest,
@@ -168,9 +170,11 @@ def scar_provenance(scar_id_or_number: str, _: CiRequired) -> dict[str, Any]:
                               .order_by(assurance.Revision.sequence)).all()
         events = db.scalars(select(AuditEvent).where(AuditEvent.scar_id == scar.id)
                            .order_by(AuditEvent.occurred_at, AuditEvent.id)).all()
+        rule_shas = {rule.id: rule.sha256 for rule in db.scalars(select(RuleVersion).where(RuleVersion.scar_id == scar.id))}
         return {"scar": scar_service.scar_response(scar).model_dump(mode="json"),
-                "revisions": [{"id": r.id, "sequence": r.sequence, "rule_id": r.rule_id,
+                "revisions": [{"id": r.id, "sequence": r.sequence, "rule_id": r.rule_id, "rule_sha256": rule_shas.get(r.rule_id),
                                "state": r.state, "author": r.author, "adversary": r.adversary,
+                               "evidence_sha256": approvals.evidence_hash(db, scar, r),
                                "report": json.loads(r.report), "challenge": json.loads(r.challenge) if r.challenge else None}
                               for r in revisions],
                 "decisions": [{"id": e.id, "actor": e.actor, "action": e.action,
@@ -193,14 +197,28 @@ def revision_artifact(scar_id_or_number: str, revision_id: str, artifact: str, _
         raise HTTPException(404, "Artifact not found")
 
 
+@app.post("/v1/scars/{scar_id_or_number}/approval-request")
+def request_approval(scar_id_or_number: str, payload: ApprovalProposalRequest, actor: AgentRequired) -> dict[str, Any]:
+    with SessionLocal() as db:
+        scar = _load_scar(db, scar_id_or_number)
+        if scar is None:
+            raise HTTPException(404, "Scar not found")
+        try:
+            packet = approvals.request(db, scar, actor, payload.revision_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        db.commit()
+        return packet
+
+
 @app.post("/v1/scars/{scar_id_or_number}/approve")
-def approve_scar(scar_id_or_number: str, payload: ApprovalRequest, actor: ApproverRequired) -> dict[str, Any]:
+def approve_scar(scar_id_or_number: str, payload: ApprovalDecisionRequest, actor: ApproverRequired) -> dict[str, Any]:
     with SessionLocal() as db:
         scar = _load_scar(db, scar_id_or_number)
         if not scar:
             raise HTTPException(status_code=404, detail="Scar not found")
         try:
-            scar = scar_service.approve_scar(db, scar, actor, payload.approver, payload.reason)
+            scar = scar_service.approve_scar(db, scar, actor, payload)
             db.commit()
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc

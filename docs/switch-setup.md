@@ -30,7 +30,7 @@ Add participants:
 - `@nope`;
 - any coding agent the team wants to pair with it.
 
-Set `@nope` to answer its owner and owner's agents only, or use custom room permissions. Never give it unrestricted `anyone` access in a production room without access review.
+Inspect `@nope`'s actual addressing policy in Console. Permit the intended owner and named peer agents, or a same-owner setting if that version offers it. Verify a real nonce reply before relying on agent-to-agent handoffs. Avoid unrestricted access as a routing workaround.
 
 ## 3. Give it the right capacity
 
@@ -52,6 +52,10 @@ export NOPE_CI_KEY=ci-change-me
 ```
 
 ## 4. Run the full loop
+
+The [live integration guide](switch-live-demo.md) covers Console credential reuse,
+real discovery, message capture, the three-agent courtroom, room documents,
+measured developer trials, authenticated PR preparation, and CI room pings.
 
 In the room:
 

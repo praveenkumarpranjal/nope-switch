@@ -1,20 +1,42 @@
-name: NOPE policy smoke test
+name: NOPE enforcement
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  push:
+    branches: [main, 'nope/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   policy:
+    name: NOPE / policy
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Check active policy
+      - name: Install scanner
         run: |
           python -m pip install uv
           uv sync --extra semgrep
-          uv run python scripts/check_assurance.py
-          sh scripts/enforce.sh
+      - name: Replay original incident and independent variants
+        run: uv run python scripts/check_assurance.py
+      - name: Enforce policy against the repository regression target
+        run: uv run python scripts/check_regression.py
+      - name: Enforce changed source
+        env:
+          GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: sh scripts/enforce.sh
+      - name: Preserve real scan evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nope-policy-evidence
+          path: |
+            .data/assurance-report.json
+            .data/regression-scan.json
+            .data/semgrep-scan.json

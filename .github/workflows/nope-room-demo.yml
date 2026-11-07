@@ -1,0 +1,49 @@
+name: NOPE CI-to-room demonstration
+
+on:
+  workflow_dispatch:
+    inputs:
+      scar:
+        description: Active Scar number
+        required: true
+        default: '1'
+      teach_url:
+        description: Original room message link for @nope teach
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  demonstrate-block:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install uv
+      - run: uv sync --extra semgrep
+      - name: Detect incident and notify room (expected exit 42)
+        env:
+          SCAR_NUMBER: ${{ inputs.scar }}
+          TEACH_URL: ${{ inputs.teach_url }}
+          NOPE_BASE_URL: ${{ vars.NOPE_BASE_URL }}
+          NOPE_AGENT_KEY: ${{ secrets.NOPE_AGENT_KEY }}
+          SWITCH_BRIDGE_URL: ${{ vars.SWITCH_BRIDGE_URL }}
+          SWITCH_ROOM_ID: ${{ vars.SWITCH_ROOM_ID }}
+          NOPE_SWITCH_ENABLED: 'true'
+          NOPE_SWITCH_BASE_URL: ${{ vars.NOPE_SWITCH_BASE_URL }}
+          NOPE_SWITCH_ROOM_ID: ${{ vars.NOPE_SWITCH_ROOM_ID }}
+          SWITCH_AGENT_ID: ${{ vars.SWITCH_AGENT_ID }}
+          SWITCH_API_ENDPOINT: ${{ vars.SWITCH_API_ENDPOINT }}
+          SWITCH_API_TOKEN: ${{ secrets.SWITCH_API_TOKEN }}
+          SWITCH_AGENT_KEY: ${{ secrets.SWITCH_AGENT_KEY }}
+        run: uv run nope-room scan-bad --scar "$SCAR_NUMBER" --teach-url "$TEACH_URL" --post
+      - name: Preserve scan and delivery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-room-evidence
+          path: .data/ci-room-ping*

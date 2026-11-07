@@ -92,6 +92,12 @@ The offline script uses the checked-in bad fixture, so no external model or chat
 
 ## Architecture
 
+The optional [`nope-room` integration](docs/switch-live-demo.md) adds verified
+Switch discovery, real room-message capture, courtroom evidence publication,
+advisory Scar documents, paired compliance scoring, approval-gated PR preparation,
+and CI-to-room notifications. Transport lives in `apps/switch`; the core safety
+path keeps its existing CLI/HTTP and RBAC boundaries.
+
 Scars now require [counterfactual replay, an independent adversarial challenge,
 and preserved provenance with regression gates](docs/scar-assurance.md). Approval
 requires detection of the original incident, a passing correction, at least six

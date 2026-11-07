@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
-from nope_core import assurance, scar_service
+from nope_core import approvals, assurance, scar_service
 from nope_core.db import Scar, SessionLocal, init_db
 from nope_core.rule_lab import RuleLab
-from nope_core.schemas import CreateScarRequest
+from nope_core.schemas import ApprovalDecisionRequest, CreateScarRequest
 from sqlalchemy import select
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -97,9 +98,16 @@ def approve(number: int) -> None:
         scar = db.scalar(select(Scar).where(Scar.number == number))
         if not scar:
             raise SystemExit(f"Scar {number} not found")
-        scar = scar_service.approve_scar(db, scar, "demo:human-approver", "sre@acme.example", "This rule is exact, tested and links to INC-014.")
+        revision = assurance.latest(db, scar)
+        if revision is None:
+            raise SystemExit("Validate and independently challenge a revision first")
+        packet = approvals.request(db, scar, "demo:offline-simulation", revision.id)
+        db.flush()
+        decision = ApprovalDecisionRequest(**packet, approver="offline-demo-reviewer",
+                                           reason="Offline simulation: reviewed replay and challenge")
+        scar = scar_service.approve_scar(db, scar, "demo:offline-simulation", decision)
         db.commit()
-        _print("Approved", scar_service.scar_response(scar).model_dump())
+        _print("Approved (MOCK offline simulation)", scar_service.scar_response(scar).model_dump())
 
 
 def activate(number: int) -> None:
@@ -113,7 +121,7 @@ def activate(number: int) -> None:
         _print("Active", scar_service.scar_response(scar).model_dump())
 
 
-def _semgrep(path: Path, expect_findings: bool) -> int:
+def _semgrep(path: Path, expect_findings: bool, report_path: Path | None = None) -> int:
     semgrep = shutil.which("semgrep")
     config = REPO_ROOT / "config" / ".semgrep" / "nope-active.yml"
     if not semgrep:
@@ -124,7 +132,15 @@ def _semgrep(path: Path, expect_findings: bool) -> int:
     if completed.returncode not in (0, 1):
         print(completed.stderr or completed.stdout)
         return completed.returncode
-    findings = len(json.loads(completed.stdout or "{}").get("results", []))
+    payload = json.loads(completed.stdout or "{}")
+    if not isinstance(payload.get("results"), list) or payload.get("errors"):
+        print("Semgrep did not complete a valid scan; refusing to report a successful demonstration.")
+        return 3
+    if report_path is not None:
+        payload["nope_rule_sha256"] = hashlib.sha256(config.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    findings = len(payload["results"])
     if expect_findings and findings:
         print(f"BLOCKED: {findings} qualifying credential log finding(s) with Scar 001.", end="\n\n")
         print("NOPE Scar 001 — Never expose authentication credentials in logs")
@@ -153,7 +169,8 @@ def main() -> None:
     activation = sub.add_parser("activate")
     activation.add_argument("number", type=int)
     sub.add_parser("scan-good")
-    sub.add_parser("scan-bad")
+    bad_scan = sub.add_parser("scan-bad")
+    bad_scan.add_argument("--report", type=Path, help="Save real scan findings for the optional room notifier")
     args = parser.parse_args()
     if args.command == "reset":
         reset()
@@ -170,7 +187,7 @@ def main() -> None:
     elif args.command == "scan-good":
         raise SystemExit(_semgrep(DEMO / "src", False))
     elif args.command == "scan-bad":
-        raise SystemExit(_semgrep(DEMO / "fixtures" / "bad-authorization-log.ts", True))
+        raise SystemExit(_semgrep(DEMO / "fixtures" / "bad-authorization-log.ts", True, args.report))
 
 if __name__ == "__main__":
     main()
