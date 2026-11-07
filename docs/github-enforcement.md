@@ -68,3 +68,19 @@ gh api repos/praveenkumarpranjal/nope-switch/rules/branches/main
 Only report a merge blocker when an active, applicable required-check rule and
 the failing required check are both verified. Missing admin rights, unavailable
 rulesets, or an inaccessible merge state remain **BLOCKED / unverified**.
+
+## Verified branch runs, 7 November 2026
+
+Both branches retain the same taint rule and enforcement workflow. The bad
+branch changes only `demo-app/regression/credential-log.ts` to the incident
+variant above. These are actual GitHub Actions runs, before a live-room human
+approval or PR has occurred:
+
+| Branch and commit | Actual result |
+| --- | --- |
+| `nope/live-approval-ci` at `a6a2fe1` | [NOPE / policy passed](https://github.com/praveenkumarpranjal/nope-switch/actions/runs/42363592076); [full CI passed](https://github.com/praveenkumarpranjal/nope-switch/actions/runs/42363592006) |
+| `nope/ci-known-bad` at `3a933fb` | [NOPE / policy failed](https://github.com/praveenkumarpranjal/nope-switch/actions/runs/42363616031) at **Enforce policy against the repository regression target** |
+
+This verifies passing clean code and failing prohibited code on GitHub. It does
+not establish authenticated human approval, an opened PR, installed branch
+protection, or a blocked merge. Those milestones remain pending real evidence.
