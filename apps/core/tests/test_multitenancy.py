@@ -141,7 +141,15 @@ def test_cross_tenant_isolation_reads_and_mutations() -> None:
         approve_resp = client.post(
             f"/v1/scars/{alpha_scar_id}/approve",
             headers={"Authorization": f"Bearer {approver_beta}"},
-            json={"approver": "approver-beta@beta.com", "reason": "Attempting cross tenant approval"},
+            json={
+                "request_id": "app_req_dummy",
+                "revision_id": "rev_dummy",
+                "evidence_sha256": "0" * 64,
+                "repository": "alpha/repo",
+                "scope": "src/",
+                "approver": "approver-beta@beta.com",
+                "reason": "Attempting cross tenant approval",
+            },
         )
         assert approve_resp.status_code == 404
 
@@ -206,16 +214,25 @@ def test_active_rules_export_isolated_by_tenant() -> None:
             },
         )
         assert adv_a.status_code == 200
-        client.post(
+        req_a = client.post(
+            f"/v1/scars/{scar_a_id}/approval-request",
+            headers={"Authorization": f"Bearer {admin_alpha}"},
+            json={"revision_id": val_a.json()["revision_id"]},
+        )
+        assert req_a.status_code == 200
+        ticket_a = req_a.json()
+        app_a = client.post(
             f"/v1/scars/{scar_a_id}/approve",
             headers={"Authorization": f"Bearer {admin_alpha}"},
-            json={"approver": "admin-alpha", "reason": "Approving tenant alpha rule"},
+            json={**ticket_a, "approver": "admin-alpha", "reason": "Approving tenant alpha rule"},
         )
-        client.post(
+        assert app_a.status_code == 200
+        act_a = client.post(
             f"/v1/scars/{scar_a_id}/activate",
             headers={"Authorization": f"Bearer {admin_alpha}"},
             json={"authorized_by": "admin-alpha", "reason": "Break-glass activation for alpha"},
         )
+        assert act_a.status_code == 200
 
         # 2. Setup tenant-beta active scar
         res_b = client.post(
@@ -240,16 +257,25 @@ def test_active_rules_export_isolated_by_tenant() -> None:
             },
         )
         assert adv_b.status_code == 200
-        client.post(
+        req_b = client.post(
+            f"/v1/scars/{scar_b_id}/approval-request",
+            headers={"Authorization": f"Bearer {admin_beta}"},
+            json={"revision_id": val_b.json()["revision_id"]},
+        )
+        assert req_b.status_code == 200
+        ticket_b = req_b.json()
+        app_b = client.post(
             f"/v1/scars/{scar_b_id}/approve",
             headers={"Authorization": f"Bearer {admin_beta}"},
-            json={"approver": "admin-beta", "reason": "Approving tenant beta rule"},
+            json={**ticket_b, "approver": "admin-beta", "reason": "Approving tenant beta rule"},
         )
-        client.post(
+        assert app_b.status_code == 200
+        act_b = client.post(
             f"/v1/scars/{scar_b_id}/activate",
             headers={"Authorization": f"Bearer {admin_beta}"},
             json={"authorized_by": "admin-beta", "reason": "Break-glass activation for beta"},
         )
+        assert act_b.status_code == 200
 
         # 3. Export rules for tenant-alpha
         export_a = client.get("/v1/rules/active.yml", headers={"Authorization": f"Bearer {ci_alpha}"})

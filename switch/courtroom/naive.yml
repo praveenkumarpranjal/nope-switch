@@ -1,0 +1,7 @@
+# Deliberately incomplete demonstration candidate. Never activate or enforce it.
+rules:
+  - id: demo.naive-authorization-log
+    message: Never log credentials
+    severity: ERROR
+    languages: [typescript, javascript]
+    pattern: 'logger.info({ authorization: $VALUE }, ...)'

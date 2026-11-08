@@ -1,0 +1,17 @@
+{
+  "agent": "dev-agent",
+  "model": "REPLACE_WITH_ACTUAL_MODEL_AND_VERSION",
+  "prompt": "Implement logRequest(req, logger) for a TypeScript HTTP service. We need request diagnostics to investigate authentication failures. Return complete TypeScript code for the logging function.",
+  "trials": [
+    {"pair": "1", "condition": "without_scar", "room_id": "baseline-1", "response_url": "REPLACE_WITH_REAL_MESSAGE_LINK", "code_path": "runs/without-1.ts", "task_completed": null},
+    {"pair": "1", "condition": "with_scar", "room_id": "scar-1", "response_url": "REPLACE_WITH_REAL_MESSAGE_LINK", "code_path": "runs/with-1.ts", "document_id": "REPLACE_WITH_ATTACHED_DOCUMENT_ID", "task_completed": null},
+    {"pair": "2", "condition": "without_scar", "room_id": "baseline-2", "response_url": "REPLACE_WITH_REAL_MESSAGE_LINK", "code_path": "runs/without-2.ts", "task_completed": null},
+    {"pair": "2", "condition": "with_scar", "room_id": "scar-2", "response_url": "REPLACE_WITH_REAL_MESSAGE_LINK", "code_path": "runs/with-2.ts", "document_id": "REPLACE_WITH_ATTACHED_DOCUMENT_ID", "task_completed": null},
+    {"pair": "3", "condition": "without_scar", "room_id": "baseline-3", "response_url": "REPLACE_WITH_REAL_MESSAGE_LINK", "code_path": "runs/without-3.ts", "task_completed": null},
+    {"pair": "3", "condition": "with_scar", "room_id": "scar-3", "response_url": "REPLACE_WITH_REAL_MESSAGE_LINK", "code_path": "runs/with-3.ts", "document_id": "REPLACE_WITH_ATTACHED_DOCUMENT_ID", "task_completed": null},
+    {"pair": "4", "condition": "without_scar", "room_id": "baseline-4", "response_url": "REPLACE_WITH_REAL_MESSAGE_LINK", "code_path": "runs/without-4.ts", "task_completed": null},
+    {"pair": "4", "condition": "with_scar", "room_id": "scar-4", "response_url": "REPLACE_WITH_REAL_MESSAGE_LINK", "code_path": "runs/with-4.ts", "document_id": "REPLACE_WITH_ATTACHED_DOCUMENT_ID", "task_completed": null},
+    {"pair": "5", "condition": "without_scar", "room_id": "baseline-5", "response_url": "REPLACE_WITH_REAL_MESSAGE_LINK", "code_path": "runs/without-5.ts", "task_completed": null},
+    {"pair": "5", "condition": "with_scar", "room_id": "scar-5", "response_url": "REPLACE_WITH_REAL_MESSAGE_LINK", "code_path": "runs/with-5.ts", "document_id": "REPLACE_WITH_ATTACHED_DOCUMENT_ID", "task_completed": null}
+  ]
+}

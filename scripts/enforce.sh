@@ -4,7 +4,6 @@ set -eu
 BASE_SHA="${NOPE_BASE_SHA:-${GITHUB_BASE_SHA:-origin/main}}"
 RULE_FILE="${NOPE_ACTIVE_RULES:-config/.semgrep/nope-active.yml}"
 SCAN_OUTPUT="${NOPE_SCAN_OUTPUT:-.data/semgrep-scan.json}"
-EXCLUDES="--exclude demo-app/fixtures/** --exclude apps/core/tests/** --exclude config/.semgrep/**"
 
 # Remove any stale scan output from previous runs to prevent stale file reuse
 rm -f "$SCAN_OUTPUT"
@@ -35,12 +34,19 @@ else
 fi
 
 SEMGREP_EXIT=0
+scan_source() {
+  # Keep globs quoted: shell expansion can turn intentional bad fixtures into
+  # explicit scan targets instead of exclusions on a full-tree scan.
+  run_semgrep scan --config "$RULE_FILE" --json --output "$SCAN_OUTPUT" --quiet \
+    --exclude 'demo-app/fixtures/**' --exclude 'apps/core/tests/**' \
+    --exclude 'config/.semgrep/**' "$@" .
+}
 if command -v git >/dev/null && git rev-parse --is-inside-work-tree >/dev/null && git cat-file -e "$BASE_SHA" 2>/dev/null; then
   echo "NOPE: scanning changes against $BASE_SHA"
-  run_semgrep scan --config "$RULE_FILE" --baseline-commit "$BASE_SHA" --json --output "$SCAN_OUTPUT" --quiet $EXCLUDES . || SEMGREP_EXIT=$?
+  scan_source --baseline-commit "$BASE_SHA" || SEMGREP_EXIT=$?
 else
   echo "NOPE: base commit unavailable; scanning source tree." >&2
-  run_semgrep scan --config "$RULE_FILE" --json --output "$SCAN_OUTPUT" --quiet $EXCLUDES . || SEMGREP_EXIT=$?
+  scan_source || SEMGREP_EXIT=$?
 fi
 
 # If Semgrep crashed or suffered a fatal exit (> 1), fail closed unconditionally!

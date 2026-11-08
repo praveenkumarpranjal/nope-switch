@@ -12,7 +12,7 @@ from nope_core.agent import (
     SessionState,
     SwitchAgentDispatcher,
 )
-from nope_core.auth import issue_token
+from nope_core.auth import Role, issue_token
 from nope_core.db import Base, engine
 from nope_core.main import app
 
@@ -81,9 +81,11 @@ def test_full_teach_and_pr_generation_workflow(temp_git_repo: Path, monkeypatch:
             assert "Never log credentials" in body
             return mock_pr_url
 
+        carol_token = issue_token("carol@acme.com", Role.APPROVER)
         dispatcher = SwitchAgentDispatcher(
             base_url="http://testserver",
             repo_dir=temp_git_repo,
+            approver_key=carol_token,
             gh_executor=mock_gh_executor,
         )
 
@@ -220,3 +222,52 @@ def test_challenge_workflow_through_agent(monkeypatch: pytest.MonkeyPatch) -> No
         chal_reply = dispatcher.handle_message("thread-chal", "dev@acme.com", chal_msg)
         assert "Challenge Recorded for Scar #001" in chal_reply
         assert "Exception ID" in chal_reply
+
+
+def test_agent_cannot_self_sign_human_approvals(temp_git_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    reset_schema()
+
+    with TestClient(app) as test_client:
+        dispatcher = SwitchAgentDispatcher(
+            base_url="http://testserver",
+            repo_dir=temp_git_repo,
+            approver_key=None,  # No approver key configured
+        )
+
+        import httpx
+
+        def test_client_factory(*args: Any, **kwargs: Any) -> Any:
+            class ClientAdapter:
+                def __init__(self, tc: TestClient, headers: dict[str, str]) -> None:
+                    self.tc = tc
+                    self.headers = headers
+
+                def __enter__(self) -> ClientAdapter:
+                    return self
+
+                def __exit__(self, *a: Any) -> None:
+                    pass
+
+                def get(self, url: str, **kw: Any) -> Any:
+                    h = {**self.headers, **kw.get("headers", {})}
+                    return self.tc.get(url, headers=h)
+
+                def post(self, url: str, **kw: Any) -> Any:
+                    h = {**self.headers, **kw.get("headers", {})}
+                    return self.tc.post(url, headers=h, json=kw.get("json"))
+
+            return ClientAdapter(test_client, kwargs.get("headers", {}))
+
+        monkeypatch.setattr(httpx, "Client", test_client_factory)
+
+        thread_id = "thread-unauthorized"
+        user_id = "agent@acme.com"
+
+        dispatcher.handle_message(thread_id, user_id, '@nope teach We had INC-100: Auth leak. Never leak auth.')
+        dispatcher.handle_message(thread_id, user_id, 'repo: acme/auth, scope: src/, rollout: blocking')
+
+        # Attempt to approve without providing human approver token
+        reply = dispatcher.handle_message(thread_id, user_id, '@nope approve Attempting unauthenticated approval')
+        assert "Approver token required" in reply
+        assert "The agent cannot self-sign human approvals" in reply
+

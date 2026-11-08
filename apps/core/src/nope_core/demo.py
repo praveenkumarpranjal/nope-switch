@@ -7,10 +7,10 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from nope_core import assurance, scar_service
+from nope_core import approvals, assurance, scar_service
 from nope_core.db import Scar, SessionLocal, init_db
 from nope_core.rule_lab import RuleLab
-from nope_core.schemas import CreateScarRequest
+from nope_core.schemas import ApprovalDecisionRequest, CreateScarRequest
 from sqlalchemy import select
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -97,7 +97,16 @@ def approve(number: int) -> None:
         scar = db.scalar(select(Scar).where(Scar.number == number))
         if not scar:
             raise SystemExit(f"Scar {number} not found")
-        scar = scar_service.approve_scar(db, scar, "demo:human-approver", "sre@acme.example", "This rule is exact, tested and links to INC-014.")
+        revision = assurance.latest(db, scar)
+        if revision is None:
+            raise SystemExit("Validate a rule revision first")
+        ticket = approvals.request(db, scar, "demo:human-approver", revision.id)
+        decision = ApprovalDecisionRequest(
+            **ticket,
+            approver="sre@acme.example",
+            reason="This rule is exact, tested and links to INC-014.",
+        )
+        scar = scar_service.approve_scar(db, scar, "demo:human-approver", decision)
         db.commit()
         _print("Approved", scar_service.scar_response(scar).model_dump())
 
