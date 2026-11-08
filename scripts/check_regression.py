@@ -8,6 +8,9 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from nope_core.paths import data_root
+from nope_core.scan_report import checked_report
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -15,7 +18,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", type=Path, default=ROOT / "demo-app/regression/credential-log.ts")
     parser.add_argument("--rule", type=Path, default=ROOT / "config/.semgrep/nope-active.yml")
-    parser.add_argument("--output", type=Path, default=ROOT / ".data/regression-scan.json")
+    parser.add_argument("--output", type=Path, default=data_root() / "regression-scan.json")
     args = parser.parse_args()
     scanner = shutil.which("semgrep")
     if not scanner or not args.target.is_file() or not args.rule.is_file():
@@ -32,7 +35,11 @@ def main() -> int:
     if not args.output.is_file():
         print("NOPE: scanner produced no evidence")
         return 2
-    report = json.loads(args.output.read_text(encoding="utf-8"))
+    try:
+        report = checked_report(json.loads(args.output.read_text(encoding="utf-8")))
+    except (OSError, ValueError) as exc:
+        print(f"NOPE: invalid scanner evidence: {exc}")
+        return 2
     if report.get("errors") or report.get("results") or not report.get("paths", {}).get("scanned"):
         print("NOPE: findings, scanner errors or an unscanned regression target")
         return 1

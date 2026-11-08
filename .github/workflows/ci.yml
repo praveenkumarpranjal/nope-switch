@@ -37,17 +37,27 @@ jobs:
           uv run mypy -p nope_core
           uv run mypy -p nope_switch
           uv run mypy apps/core/tests
+          uv run mypy scripts/smoke_backend.py
           uv run pytest
 
       - name: Counterfactual replay and independent Scar challenge
         run: uv run python scripts/check_assurance.py
+
+      - name: Real HTTP backend workflow with isolated SQLite ledger
+        run: uv run python scripts/smoke_backend.py
+
+      - name: Naive-versus-taint Rule Lab comparison (offline Switch context)
+        run: uv run nope-room courtroom
 
       - name: Preserve Scar test evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: scar-assurance-report
-          path: .data/assurance-report.json
+          path: |
+            .data/assurance-report.json
+            .data/courtroom.json
+            .data/backend-smoke-sqlite.json
 
       - name: Target service checks
         run: |
@@ -59,3 +69,32 @@ jobs:
         env:
           GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: sh scripts/enforce.sh
+
+  container:
+    name: Docker and PostgreSQL backend
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build locked production image
+        run: docker build -t nope-backend-check .
+      - name: Verify production image with disposable PostgreSQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          export POSTGRES_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(24))')"
+          echo "::add-mask::$POSTGRES_PASSWORD"
+          docker network create nope-backend-check
+          docker run -d --name nope-backend-check-pg --network nope-backend-check -e POSTGRES_PASSWORD postgres:16-alpine
+          for attempt in $(seq 1 40); do
+            if docker exec nope-backend-check-pg pg_isready -U postgres; then break; fi
+            sleep 1
+          done
+          export NOPE_SMOKE_DATABASE_URL="postgresql+psycopg://postgres:${POSTGRES_PASSWORD}@nope-backend-check-pg:5432/postgres"
+          docker run --rm --network nope-backend-check -e NOPE_SMOKE_DATABASE_URL nope-backend-check python scripts/smoke_backend.py
+      - name: Remove disposable database
+        if: always()
+        run: |
+          docker rm -f nope-backend-check-pg || true
+          docker network rm nope-backend-check || true

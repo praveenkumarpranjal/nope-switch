@@ -2,12 +2,17 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 COPY apps ./apps
-RUN uv sync --frozen --no-dev --extra semgrep --no-editable
+RUN uv sync --frozen --extra semgrep --no-editable
 
 FROM python:3.12-slim-bookworm
-ENV PATH="/app/.venv/bin:${PATH}" PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+ENV PATH="/app/.venv/bin:${PATH}" PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 NOPE_WORKDIR=/var/lib/nope NOPE_PROJECT_ROOT=/app
 WORKDIR /app
 COPY --from=builder /app /app
+COPY config ./config
+COPY demo-app ./demo-app
+COPY switch ./switch
+COPY scripts ./scripts
+COPY docs ./docs
 RUN useradd --create-home --uid 10001 nope && mkdir -p /var/lib/nope && chown -R nope:nope /var/lib/nope
 USER nope
 EXPOSE 8010

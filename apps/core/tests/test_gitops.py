@@ -20,6 +20,21 @@ def _make_github_signature(payload_bytes: bytes, secret: str) -> str:
     return "sha256=" + hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
 
 
+@pytest.fixture(autouse=True)
+def merged_rule_readback(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These tests exercise webhook state transitions; HTTP readback is covered separately.
+    monkeypatch.setattr("nope_core.main.verify_merged_rule", lambda *args: None)
+
+
+def bound_merge_payload(payload: dict[str, Any], scar: dict[str, Any] | None = None) -> dict[str, Any]:
+    pr = payload["pull_request"]
+    base = pr.setdefault("base", {"ref": "main"})
+    base.setdefault("repo", {"full_name": "acme/payments"})
+    if scar and "nope-approval:" not in (pr.get("body") or ""):
+        pr["body"] = (pr.get("body") or "") + "\n<!-- nope-approval: " + json.dumps(scar["_approval_binding"]) + " -->"
+    return payload
+
+
 def test_webhook_ping_event() -> None:
     with TestClient(app) as client:
         resp = client.post(
@@ -188,6 +203,8 @@ def _create_approved_scar(client: TestClient) -> dict[str, Any]:
     )
     assert appr_resp.status_code == 200
     assert appr_resp.json()["status"] == ScarStatus.APPROVED.value
+    scar_data["_approval_binding"] = {"revision_id": requested.json()["revision_id"],
+                                      "evidence_sha256": requested.json()["evidence_sha256"]}
     return cast(dict[str, Any], scar_data)
 
 
@@ -213,7 +230,7 @@ def test_webhook_pr_merge_activates_approved_scar() -> None:
         resp = client.post(
             "/v1/webhooks/github",
             headers={"X-GitHub-Event": "pull_request"},
-            json=pr_payload,
+            json=bound_merge_payload(pr_payload, scar),
         )
         assert resp.status_code == 200
         data = resp.json()
@@ -276,7 +293,7 @@ def test_webhook_pr_merge_warns_on_unapproved_scar() -> None:
         webhook_resp = client.post(
             "/v1/webhooks/github",
             headers={"X-GitHub-Event": "pull_request"},
-            json=pr_payload,
+            json=bound_merge_payload(pr_payload),
         )
         assert webhook_resp.status_code == 200
         data = webhook_resp.json()
@@ -319,7 +336,7 @@ def test_webhook_pr_metadata_extraction_variants() -> None:
         resp = client.post(
             "/v1/webhooks/github",
             headers={"X-GitHub-Event": "pull_request"},
-            json=pr_payload_title,
+            json=bound_merge_payload(pr_payload_title, scar),
         )
         assert resp.status_code == 200
         assert resp.json()["status"] == "activated"
@@ -328,7 +345,7 @@ def test_webhook_pr_metadata_extraction_variants() -> None:
         resp2 = client.post(
             "/v1/webhooks/github",
             headers={"X-GitHub-Event": "pull_request"},
-            json=pr_payload_title,
+            json=bound_merge_payload(pr_payload_title, scar),
         )
         assert resp2.status_code == 200
         assert resp2.json()["status"] == "already_active"
@@ -450,7 +467,7 @@ def test_webhook_delivery_idempotency() -> None:
         resp1 = client.post(
             "/v1/webhooks/github",
             headers={"X-GitHub-Event": "pull_request", "X-GitHub-Delivery": delivery_id},
-            json=pr_payload,
+            json=bound_merge_payload(pr_payload, scar),
         )
         assert resp1.status_code == 200
         assert resp1.json()["status"] == "activated"
@@ -458,7 +475,7 @@ def test_webhook_delivery_idempotency() -> None:
         resp2 = client.post(
             "/v1/webhooks/github",
             headers={"X-GitHub-Event": "pull_request", "X-GitHub-Delivery": delivery_id},
-            json=pr_payload,
+            json=bound_merge_payload(pr_payload, scar),
         )
         assert resp2.status_code == 200
         assert resp2.json()["status"] == "already_processed"
@@ -494,7 +511,7 @@ def test_webhook_target_branch_filtering() -> None:
         resp = client.post(
             "/v1/webhooks/github",
             headers={"X-GitHub-Event": "pull_request"},
-            json=pr_payload,
+            json=bound_merge_payload(pr_payload, scar),
         )
         assert resp.status_code == 200
         assert resp.json()["status"] == "ignored"
@@ -503,3 +520,35 @@ def test_webhook_target_branch_filtering() -> None:
         scar_check = client.get(f"/v1/scars/{scar['id']}", headers={"X-NOPE-Key": "agent"})
         assert scar_check.json()["status"] == ScarStatus.APPROVED.value
         assert scar_check.json()["active"] is False
+
+
+@pytest.mark.parametrize("payload", [None, [], 1, "string", {"action": "closed", "pull_request": {
+    "merged": True, "base": None, "head": None}}])
+def test_malformed_webhooks_are_client_errors(payload: Any) -> None:
+    with TestClient(app) as client:
+        response = client.post("/v1/webhooks/github", headers={"X-GitHub-Event": "pull_request"},
+                               content=json.dumps(payload).encode("utf-8"))
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize("length", ["invalid", "-1", "1.5"])
+def test_invalid_webhook_content_length_is_rejected(length: str) -> None:
+    with TestClient(app) as client:
+        response = client.post("/v1/webhooks/github", headers={"Content-Length": length}, content=b"{}")
+    assert response.status_code == 400
+
+
+def test_merge_verification_rejects_wrong_repository_and_stale_binding() -> None:
+    with TestClient(app) as client:
+        scar = _create_approved_scar(client)
+        payload = bound_merge_payload({"action": "closed", "pull_request": {
+            "number": 107, "merged": True, "merge_commit_sha": "a" * 40,
+            "head": {"ref": f"nope/scar-{scar['number']}"}}}, scar)
+        payload["pull_request"]["base"]["repo"]["full_name"] = "other/repository"
+        wrong_repo = client.post("/v1/webhooks/github", headers={"X-GitHub-Event": "pull_request"}, json=payload)
+        assert wrong_repo.status_code == 409 and "repository" in wrong_repo.text
+        payload["pull_request"]["base"]["repo"]["full_name"] = "acme/payments"
+        payload["pull_request"]["body"] = '<!-- nope-approval: {"revision_id":"rev-stale","evidence_sha256":"stale"} -->'
+        stale = client.post("/v1/webhooks/github", headers={"X-GitHub-Event": "pull_request"}, json=payload)
+        assert stale.status_code == 409 and "stale" in stale.text
+        assert client.get(f"/v1/scars/{scar['number']}", headers={"X-NOPE-Key": "agent"}).json()["active"] is False

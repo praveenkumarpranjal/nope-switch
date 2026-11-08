@@ -8,12 +8,14 @@ from pathlib import Path
 from typing import Any
 
 from nope_core import approvals, assurance, scar_service
-from nope_core.db import Scar, SessionLocal, init_db
+from nope_core.config import settings
+from nope_core.db import Scar, SessionLocal, engine, init_db
+from nope_core.paths import data_root, project_root
 from nope_core.rule_lab import RuleLab
 from nope_core.schemas import ApprovalDecisionRequest, CreateScarRequest
-from sqlalchemy import select
+from sqlalchemy import make_url, select
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = project_root()
 DEMO = REPO_ROOT / "demo-app"
 
 
@@ -33,12 +35,20 @@ def _print(title: str, body: object) -> None:
 
 
 def reset() -> None:
-    root = REPO_ROOT / ".data"
-    if root.exists() and REPO_ROOT in root.parents:
-        shutil.rmtree(root)
+    root = data_root()
+    url = make_url(settings.database_url)
+    if url.get_backend_name() != "sqlite" or not url.database or url.database == ":memory:":
+        raise SystemExit("Offline reset supports a local SQLite ledger only")
+    database = Path(url.database).expanduser().resolve()
+    if root not in database.parents:
+        raise SystemExit("Offline ledger must be inside NOPE_WORKDIR; refusing to reset another database")
+    engine.dispose()
+    # Reset only the offline ledger. Room evidence and other files stay intact.
+    for suffix in ("", "-wal", "-shm"):
+        Path(str(database) + suffix).unlink(missing_ok=True)
     root.mkdir(parents=True, exist_ok=True)
     init_db()
-    print(f"Reset local ledger at {root}.")
+    print(f"Reset local ledger at {database}.")
 
 
 def teach() -> None:

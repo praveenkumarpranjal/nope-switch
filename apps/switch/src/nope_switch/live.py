@@ -126,7 +126,7 @@ def roundtrip(
         observed = next(
             (entry for entry in entries(context) if entry.get("id") == reply["event_id"]), None
         )
-        if observed:
+        if observed and observed.get("sender") == client.agent_id:
             report.update(
                 {
                     "status": "LIVE",

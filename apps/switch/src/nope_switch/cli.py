@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from nope_core.paths import data_root, project_root
 from nope_core.rule_lab import RuleLabError
 
 from nope_switch.config import RoomSettings
@@ -26,10 +27,16 @@ from nope_switch.evidence import (
     verify_room_source,
 )
 from nope_switch.live import discover, entries, receive, roundtrip
-from nope_switch.pull_request import approved_proposal, description, verify_pr_tree
+from nope_switch.pull_request import (
+    approved_proposal,
+    description,
+    verify_pr_tree,
+    verify_published_branch,
+)
 from nope_switch.transport import SwitchClient, SwitchError
 
-ROOT = Path(__file__).resolve().parents[4]
+ROOT = project_root()
+DATA = data_root()
 
 
 def save(path: Path, value: Any) -> None:
@@ -108,18 +115,18 @@ def parser() -> argparse.ArgumentParser:
         help="Discover the actual room, Mattermost bridge, and agent; never asserts LIVE",
     )
     discovery.add_argument("--room-name", default="nope-never-again")
-    discovery.add_argument("--output", type=Path, default=ROOT / ".data/switch-status.json")
+    discovery.add_argument("--output", type=Path, default=DATA / "switch-status.json")
     incoming = sub.add_parser(
         "receive", help="Record real teach/challenge messages using Console's existing identity"
     )
     incoming.add_argument("--since")
-    incoming.add_argument("--output", type=Path, default=ROOT / ".data/switch-requests.json")
+    incoming.add_argument("--output", type=Path, default=DATA / "switch-requests.json")
     trip = sub.add_parser(
         "roundtrip", help="Verify an actual room request and a persisted @nope reply"
     )
     trip.add_argument("--source-message-id", required=True)
     trip.add_argument("--room-name", default="nope-never-again")
-    trip.add_argument("--output", type=Path, default=ROOT / ".data/switch-status.json")
+    trip.add_argument("--output", type=Path, default=DATA / "switch-status.json")
     probe = sub.add_parser("probe", help="Test real agent-to-agent addressing with a nonce reply")
     probe.add_argument("--target", required=True)
     probe.add_argument(
@@ -145,7 +152,7 @@ def parser() -> argparse.ArgumentParser:
     court.add_argument("--reviewer", default="nope-reviewer")
     court.add_argument("--preflight", type=Path, nargs="*", default=[])
     court.add_argument("--post", action="store_true")
-    court.add_argument("--output", type=Path, default=ROOT / ".data/courtroom.json")
+    court.add_argument("--output", type=Path, default=DATA / "courtroom.json")
     document = sub.add_parser("document", help="Export an approved Scar as advisory room context")
     document.add_argument("scar")
     document.add_argument("--provenance", type=Path)
@@ -156,11 +163,11 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Create a room document using the existing Console session",
     )
-    document.add_argument("--output", type=Path, default=ROOT / ".data/scar-room.md")
+    document.add_argument("--output", type=Path, default=DATA / "scar-room.md")
     benchmark = sub.add_parser("compliance", help="Score at least five paired, real agent trials")
     benchmark.add_argument("--manifest", type=Path, required=True)
     benchmark.add_argument("--rule", type=Path, default=ROOT / "config/.semgrep/nope-active.yml")
-    benchmark.add_argument("--output", type=Path, default=ROOT / ".data/compliance.json")
+    benchmark.add_argument("--output", type=Path, default=DATA / "compliance.json")
     scan = sub.add_parser(
         "scan-bad",
         help="Run the real demo scan; notify only after exit 42, preserving that exit code",
@@ -169,11 +176,11 @@ def parser() -> argparse.ArgumentParser:
     scan.add_argument("--provenance", type=Path)
     scan.add_argument("--teach-url")
     scan.add_argument("--post", action="store_true")
-    scan.add_argument("--output", type=Path, default=ROOT / ".data/ci-room-ping.json")
+    scan.add_argument("--output", type=Path, default=DATA / "ci-room-ping.json")
     approval = sub.add_parser("request-approval", help="Publish the exact core approval request in its original room")
     approval.add_argument("scar")
     approval.add_argument("--revision", required=True)
-    approval.add_argument("--output", type=Path, default=ROOT / ".data/approval-request.json")
+    approval.add_argument("--output", type=Path, default=DATA / "approval-request.json")
     pr = sub.add_parser(
         "prepare-pr", help="Prepare a PR description only after canonical human approval"
     )
@@ -185,7 +192,7 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Create the GitHub PR with gh after checking approval and branch",
     )
-    pr.add_argument("--output", type=Path, default=ROOT / ".data/scar-pr.md")
+    pr.add_argument("--output", type=Path, default=DATA / "scar-pr.md")
     return result
 
 
@@ -258,6 +265,7 @@ def run(args: argparse.Namespace) -> int:
                 )
             revision, _ = approved_proposal(data)
             verify_pr_tree(ROOT, revision, data["scar"]["repository"])
+            verify_published_branch(ROOT, data["scar"]["repository"], args.head)
             # Recheck canonical approval immediately before the external write.
             if description(provenance(args.scar, None)) != body:
                 raise ValueError("Approval changed during preparation; review the current candidate")
@@ -266,6 +274,8 @@ def run(args: argparse.Namespace) -> int:
                     "gh",
                     "pr",
                     "create",
+                    "--repo",
+                    data["scar"]["repository"],
                     "--head",
                     args.head,
                     "--base",
@@ -383,6 +393,8 @@ def run(args: argparse.Namespace) -> int:
             if client:
                 client.close()
     if args.command == "document":
+        if (args.post or args.attach) and (args.provenance or args.teach_url):
+            raise ValueError("Live publication must use canonical core provenance and its original teach URL")
         data = provenance(args.scar, args.provenance)
         content = scar_document(data, args.teach_url)
         args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -414,6 +426,8 @@ def run(args: argparse.Namespace) -> int:
             return completed.returncode
         receipt = {"scan_exit": 42, "delivery": "not_requested"}
         try:
+            if args.post and (args.provenance or args.teach_url):
+                raise ValueError("Live notification must use canonical core provenance and its original teach URL")
             data = provenance(args.scar, args.provenance)
             message = failure_message(
                 json.loads(scan_path.read_text(encoding="utf-8")), data, args.teach_url

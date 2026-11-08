@@ -98,11 +98,18 @@ class SwitchClient:
 
     def operation(self, name: str, arguments: dict[str, Any], connected: bool = False) -> Any:
         if self._operations is None:
-            self._operations = self._request("GET", self.prefix + "/ops").get("operations", {})
+            operations = self._request("GET", self.prefix + "/ops").get("operations")
+            if not isinstance(operations, dict):
+                raise SwitchError("Switch returned an invalid operation registry")
+            self._operations = operations
         spec = self._operations.get(name)
         if not isinstance(spec, dict):
             raise SwitchError(f"The server does not advertise operation {name}")
         schema = spec.get("input_schema", {})
+        if (not isinstance(schema, dict) or not isinstance(schema.get("properties", {}), dict)
+                or not isinstance(schema.get("required", []), list)
+                or any(not isinstance(key, str) for key in schema.get("required", []))):
+            raise SwitchError(f"Switch returned an invalid schema for operation {name}")
         missing = set(schema.get("required", [])) - arguments.keys()
         unknown = arguments.keys() - schema.get("properties", {}).keys()
         if missing or unknown:

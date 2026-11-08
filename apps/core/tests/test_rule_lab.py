@@ -185,3 +185,13 @@ def test_rule_lab_resource_limit_signal_handling(monkeypatch: pytest.MonkeyPatch
     result = lab.validate(RULE, [("bad.ts", BAD)], [("good.ts", GOOD)])
     assert result.passed is False
     assert any("sandbox resource limits" in err for err in result.rule_errors)
+
+
+@pytest.mark.parametrize("payload", [None, [], {}, {"results": [], "errors": None},
+    {"results": [None], "errors": []}, {"results": [], "errors": [], "paths": None}])
+def test_malformed_scanner_output_fails_without_crashing(payload: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("nope_core.rule_lab.shutil.which", lambda _: "semgrep")
+    monkeypatch.setattr("nope_core.rule_lab.subprocess.run", lambda args, **kw:
+                        subprocess.CompletedProcess(args, 0, json.dumps(payload), ""))
+    result = RuleLab().validate(RULE, [("original.ts", BAD)], [("corrected.ts", GOOD)])
+    assert not result.passed and result.rule_errors

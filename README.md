@@ -90,6 +90,9 @@ uv run nope-demo scan-bad
 
 ## Architecture
 
+Repeatable backend, real HTTP, Docker/PostgreSQL and TypeScript checks are in
+[backend verification](docs/backend-verification.md).
+
 Scars now require [counterfactual replay, an independent adversarial challenge,
 and preserved provenance with regression gates](docs/scar-assurance.md). Approval
 requires detection of the original incident, a passing correction, at least six

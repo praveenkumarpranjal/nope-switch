@@ -3,7 +3,7 @@ set -eu
 
 BASE_SHA="${NOPE_BASE_SHA:-${GITHUB_BASE_SHA:-origin/main}}"
 RULE_FILE="${NOPE_ACTIVE_RULES:-config/.semgrep/nope-active.yml}"
-SCAN_OUTPUT="${NOPE_SCAN_OUTPUT:-.data/semgrep-scan.json}"
+SCAN_OUTPUT="${NOPE_SCAN_OUTPUT:-${NOPE_WORKDIR:-.data}/semgrep-scan.json}"
 
 # Remove any stale scan output from previous runs to prevent stale file reuse
 rm -f "$SCAN_OUTPUT"

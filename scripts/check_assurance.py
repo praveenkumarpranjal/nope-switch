@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+from nope_core.paths import data_root
 from nope_core.rule_lab import RuleLab
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,8 +38,8 @@ def main() -> None:
         "misses": len(bundle["bad_examples"]) - detections,
         "false_positives": sum(h > 0 for h in challenge.good_hits.values()),
     }
-    output = ROOT / ".data" / "assurance-report.json"
-    output.parent.mkdir(exist_ok=True)
+    output = data_root() / "assurance-report.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
     if not replay.passed or not challenge.passed:
