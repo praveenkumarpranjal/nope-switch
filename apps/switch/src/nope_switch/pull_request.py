@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,7 @@ def verify_pr_tree(root: Path, revision: dict[str, Any], repository: str) -> Non
     """The committed PR tree must actually contain the approved rule and CI gate."""
     def git_file(path: str) -> str:
         return subprocess.run(["git", "show", f"HEAD:{path}"], cwd=root,
-                              capture_output=True, text=True, check=True).stdout
+                              capture_output=True, text=True, encoding="utf-8", check=True).stdout
 
     rule = git_file("config/.semgrep/nope-active.yml")
     if hashlib.sha256(rule.encode()).hexdigest() != revision["rule_sha256"]:
@@ -31,6 +32,16 @@ def verify_pr_tree(root: Path, revision: dict[str, Any], repository: str) -> Non
                             cwd=root, capture_output=True, text=True, check=True).stdout.strip()
     if actual != repository:
         raise ValueError("The selected GitHub repository differs from the approved repository scope")
+
+
+def verify_published_branch(root: Path, repository: str, branch: str) -> None:
+    local = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root,
+                           capture_output=True, text=True, check=True).stdout.strip()
+    remote = subprocess.run(["gh", "api", f"repos/{repository}/git/ref/heads/{branch}",
+                             "--jq", ".object.sha"], cwd=root,
+                            capture_output=True, text=True, check=True).stdout.strip()
+    if not local or local != remote:
+        raise ValueError("Push the reviewed commit to the selected GitHub branch before creating its PR")
 
 
 def approved_proposal(provenance: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -95,6 +106,8 @@ def description(provenance: dict[str, Any]) -> str:
         f"Original room report: {link}\n\nIncident: {scar.get('incident_url') or scar['origin']}\n\n"
         f"Approved revision: `{revision['id']}`\n\n"
         f"Evidence SHA-256: `{revision['evidence_sha256']}`\n\n"
+        "<!-- nope-approval: " + json.dumps({"revision_id": revision["id"],
+                                            "evidence_sha256": revision["evidence_sha256"]}, sort_keys=True) + " -->\n\n"
         f"Repository / scope: `{scar['repository']}` / `{scar['scope']}`\n\n"
         f"Human approver: {approval['detail']['approver']} ({approval['actor']})\n\n"
         f"Validation: incident detected; correction passes; historical regressions pass. "

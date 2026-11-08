@@ -4,8 +4,10 @@ import json
 import os
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from nope_core.auth import AuthIdentity, Role, issue_token, parse_api_keys, verify_token
+from nope_core import auth
+from nope_core.auth import AuthIdentity, Role, authorize, issue_token, parse_api_keys, verify_token
 from nope_core.db import AuditEvent, SessionLocal
 from nope_core.main import app
 from sqlalchemy import select
@@ -193,3 +195,37 @@ def test_anti_impersonation_in_approvals() -> None:
             assert audit is not None
             detail = json.loads(audit.detail)
             assert detail["approver"] == "alice@acme.com"
+
+
+@pytest.mark.parametrize("setting", [":admin", "same:agent,same:admin"])
+def test_ambiguous_key_configuration_is_rejected(setting: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NOPE_API_KEYS", setting)
+    with pytest.raises(RuntimeError, match="non-empty, unique"):
+        parse_api_keys()
+
+
+@pytest.mark.parametrize("role", [Role.APPROVER, Role.ADMIN])
+@pytest.mark.asyncio
+async def test_anonymous_mode_never_grants_approval_or_admin(role: Role, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(auth, "ALLOW_ANONYMOUS", True)
+    with pytest.raises(HTTPException) as rejected:
+        await authorize(role)(None, None)
+    assert rejected.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_anonymous_mode_is_development_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(auth, "ALLOW_ANONYMOUS", True)
+    monkeypatch.setenv("NOPE_ENV", "production")
+    with pytest.raises(HTTPException) as rejected:
+        await authorize(Role.AGENT)(None, None)
+    assert rejected.value.status_code == 401
+    monkeypatch.setenv("NOPE_ENV", "development")
+    assert (await authorize(Role.AGENT)(None, None)).subject == "local-anonymous"
+
+
+@pytest.mark.asyncio
+async def test_non_ascii_key_is_rejected_without_server_error() -> None:
+    with pytest.raises(HTTPException) as rejected:
+        await authorize(Role.AGENT)("invalid-é-key", None)
+    assert rejected.value.status_code == 403

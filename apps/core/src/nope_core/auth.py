@@ -201,6 +201,8 @@ def parse_api_keys() -> dict[str, AuthIdentity]:
         if len(parts) < 2:
             raise RuntimeError("NOPE_API_KEYS must use 'key:role[:subject[:org]]' entries separated by commas")
         key = parts[0].strip()
+        if not key or key in parsed:
+            raise RuntimeError("NOPE_API_KEYS requires non-empty, unique keys")
         role_name = parts[1].strip().lower()
         try:
             role = Role[role_name.upper()]
@@ -264,7 +266,7 @@ def authorize(minimum: Role) -> Callable[[Annotated[str | None, Header()], Annot
             # Re-read API_KEYS if dynamically reconfigured in tests
             current_keys = API_KEYS or parse_api_keys()
             for expected_key, identity in current_keys.items():
-                if hmac.compare_digest(expected_key, x_nope_key):
+                if hmac.compare_digest(expected_key.encode("utf-8"), x_nope_key.encode("utf-8")):
                     if identity.role < minimum:
                         raise HTTPException(
                             status_code=status.HTTP_403_FORBIDDEN,
@@ -277,7 +279,11 @@ def authorize(minimum: Role) -> Callable[[Annotated[str | None, Header()], Annot
             )
 
         # 3. Anonymous fallback if allowed
-        if ALLOW_ANONYMOUS:
+        if (
+            ALLOW_ANONYMOUS
+            and minimum <= Role.AGENT
+            and os.getenv("NOPE_ENV", "production").lower() in {"dev", "development", "test"}
+        ):
             return AuthIdentity(
                 subject="local-anonymous",
                 role=Role.ANONYMOUS,

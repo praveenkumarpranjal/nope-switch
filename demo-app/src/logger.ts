@@ -16,17 +16,35 @@ function normalizeKey(key: string): string {
 export type LogMeta = Readonly<Record<string, unknown>>;
 
 export function redactForLog(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(redactForLog);
+  return redactValue(value, new WeakSet<object>(), 0);
+}
+
+function redactValue(value: unknown, ancestors: WeakSet<object>, depth: number): unknown {
+  if (typeof value === 'bigint') {
+    return value.toString();
   }
   if (value === null || typeof value !== 'object') {
     return value;
   }
-  const redacted: Record<string, unknown> = {};
-  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
-    redacted[key] = forbiddenKeys.has(normalizeKey(key)) ? '[REDACTED]' : redactForLog(nested);
+  if (ancestors.has(value)) {
+    return '[Circular]';
   }
-  return redacted;
+  if (depth >= 50) {
+    return '[Maximum depth]';
+  }
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return value.map((item) => redactValue(item, ancestors, depth + 1));
+    }
+    const redacted: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      redacted[key] = forbiddenKeys.has(normalizeKey(key)) ? '[REDACTED]' : redactValue(nested, ancestors, depth + 1);
+    }
+    return redacted;
+  } finally {
+    ancestors.delete(value);
+  }
 }
 
 function emit(level: 'info' | 'warn' | 'error', meta: LogMeta, message: string): void {

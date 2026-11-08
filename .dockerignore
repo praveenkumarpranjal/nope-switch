@@ -12,6 +12,7 @@
 .venv
 .data
 dist
+**/dist
 build
 *.db
 .DS_Store

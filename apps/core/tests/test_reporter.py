@@ -6,6 +6,7 @@ import threading
 import time
 from collections.abc import Generator
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -105,6 +106,15 @@ def test_process_scan_file_invalid_json(tmp_path: Path) -> None:
     scan_file.write_text("not json content {")
 
     assert process_scan_file(scan_file) == 1
+
+
+@pytest.mark.parametrize("payload", [None, [], {}, {"errors": []}, {"results": [], "errors": None},
+    {"results": [None], "errors": []}, {"results": [{"path": "src/a.ts", "extra": None}], "errors": []},
+    {"results": [{"path": "src/a.ts", "start": {"line": "1\n::warning"}}], "errors": []}])
+def test_malformed_report_cannot_pass_or_crash(tmp_path: Path, payload: Any) -> None:
+    report = tmp_path / "malformed.json"
+    report.write_text(json.dumps(payload), encoding="utf-8")
+    assert process_scan_file(report, fail_closed=False) == 1
 
 
 def test_process_scan_file_semgrep_errors_fail_closed(
@@ -360,6 +370,7 @@ def test_live_server_integration_records_failure_and_returns_remediation(
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_file))
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     monkeypatch.setenv("NOPE_CI_KEY", "ci")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "acme/payments-api")
 
     scan_file.write_text(
         json.dumps({

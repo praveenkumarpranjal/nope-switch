@@ -84,3 +84,19 @@ approval or PR has occurred:
 This verifies passing clean code and failing prohibited code on GitHub. It does
 not establish authenticated human approval, an opened PR, installed branch
 protection, or a blocked merge. Those milestones remain pending real evidence.
+
+## Backend verification of a merged safeguard
+
+PR preparation now verifies that the selected GitHub branch contains the exact
+reviewed local commit and rule. The generated description carries a
+`nope-approval` binding to its revision and evidence hash. Preserve this binding
+when editing a PR description; re-prepare older PR descriptions before merging.
+
+The merge webhook requires a valid repository/base branch, the exact current
+approval binding and matching approved evidence. It reads the committed
+`config/.semgrep/nope-active.yml` from GitHub at the merge SHA and compares its
+SHA-256 with the approved candidate before activation. Missing permission,
+unavailable GitHub, a missing file or a different rule leaves the safeguard
+unactivated. Configure `GITHUB_WEBHOOK_SECRET` and, for private repositories,
+`GITHUB_TOKEN` with **Contents: read** on the backend. Compose forwards these
+settings; no real credential belongs in source control.

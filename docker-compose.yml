@@ -1,7 +1,6 @@
 services:
   postgres:
     image: postgres:16-alpine
-    restart: unless-stopped
     environment:
       POSTGRES_DB: nope
       POSTGRES_USER: nope
@@ -16,29 +15,15 @@ services:
 
   nope-core:
     build: .
-    restart: unless-stopped
     ports:
-      - "8010:8010"
+      - "127.0.0.1:8010:8010"
     environment:
       DATABASE_URL: postgresql+psycopg://nope:${NOPE_DB_PASSWORD:-nope-local-only-change-me}@postgres:5432/nope
       NOPE_API_KEYS: ${NOPE_API_KEYS:-admin-change-me:admin,approver-change-me:approver,agent-change-me:agent,challenger-change-me:agent,ci-change-me:ci}
       NOPE_ENV: production
       NOPE_SCAN_ROOT: /workspace
-    volumes:
-      - nope-state:/var/lib/nope
-      - .:/workspace:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  nope-worker:
-    build: .
-    restart: unless-stopped
-    command: ["nope", "worker", "--poll-interval", "1"]
-    environment:
-      DATABASE_URL: postgresql+psycopg://nope:${NOPE_DB_PASSWORD:-nope-local-only-change-me}@postgres:5432/nope
-      NOPE_ENV: production
-      NOPE_SCAN_ROOT: /workspace
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
     volumes:
       - nope-state:/var/lib/nope
       - .:/workspace:ro

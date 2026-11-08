@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import urljoin
 
 import httpx
+from nope_core.scan_report import checked_report
 
 
 def escape_property(value: Any) -> str:
@@ -214,7 +215,7 @@ def process_scan_file(
 
     try:
         content = scan_json_path.read_text(encoding="utf-8")
-        raw = json.loads(content) if content.strip() else {}
+        raw = checked_report(json.loads(content))
     except Exception as exc:
         print(f"[NOPE] Error: Invalid JSON in {scan_json_path}: {exc}", file=sys.stderr)
         return 1

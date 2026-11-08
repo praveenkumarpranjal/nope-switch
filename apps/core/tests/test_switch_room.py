@@ -455,6 +455,44 @@ def test_pr_checks_actual_committed_rule_before_external_write(monkeypatch: pyte
         verify_pr_tree(Path.cwd(), revision, repository)
 
 
+def test_invalid_operation_registry_is_a_controlled_error() -> None:
+    room = SwitchClient("https://switch.example", "nope", "test-key", "room",
+                        client=httpx.Client(transport=httpx.MockTransport(
+                            lambda request: httpx.Response(200, json={"operations": None}))))
+    with pytest.raises(SwitchError, match="invalid operation registry"):
+        room.operation("list_rooms", {})
+    room.close()
+
+
+def test_roundtrip_rejects_a_reply_from_another_sender(monkeypatch: pytest.MonkeyPatch) -> None:
+    bridge = Bridge()
+    room = client(bridge)
+    bridge.timeline.append({"id": "forged-reply", "sender": "another-agent", "body": "not nope"})
+    monkeypatch.setattr(room, "post", lambda content: {"ok": True, "event_id": "forged-reply"})
+    monkeypatch.setattr("nope_switch.live.time.sleep", lambda _: None)
+    with pytest.raises(SwitchError, match="reply was not observed"):
+        roundtrip(room, settings(), "nope-never-again", "teach-id")
+
+
+def test_live_document_cannot_use_local_approval_artifact() -> None:
+    args = parser().parse_args(["document", "1", "--provenance", "local.json", "--post"])
+    with pytest.raises(ValueError, match="canonical core provenance"):
+        run(args)
+
+
+def test_pr_rejects_an_unpushed_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    from nope_switch.pull_request import verify_published_branch
+
+    def command(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout="local-sha" if args[0] == "git" else "older-remote-sha")
+
+    monkeypatch.setattr("nope_switch.pull_request.subprocess.run", command)
+    with pytest.raises(ValueError, match="Push the reviewed commit"):
+        verify_published_branch(Path.cwd(), "acme/service", "nope/scar-001")
+
+
 def test_live_publication_uses_immutable_workbench_corpus_and_original_room() -> None:
     data = proposal()
     first = json.loads(json.dumps(data["revisions"][0]))

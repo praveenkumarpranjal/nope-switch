@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from nope_core.scan_report import checked_report
 
 REDOS_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\([^)]*[\+\*]\)[\+\*]"),
@@ -212,6 +213,8 @@ class RuleLab:
                     command,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=self.timeout_seconds,
                     check=False,
                     preexec_fn=_sandbox_preexec if os.name != "nt" else None,
@@ -229,8 +232,8 @@ class RuleLab:
                 )
 
             try:
-                payload = json.loads(completed.stdout or "{}")
-            except json.JSONDecodeError:
+                payload = checked_report(json.loads(completed.stdout or "{}"))
+            except (ValueError, json.JSONDecodeError):
                 detail = (completed.stderr or completed.stdout).strip()[:800]
                 return CandidateResult(False, {}, {}, [], [f"semgrep returned invalid JSON: {detail}"])
 
@@ -240,8 +243,6 @@ class RuleLab:
                 if detail:
                     error_msg += f": {detail}"
                 return CandidateResult(False, {}, {}, [], [error_msg])
-            if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
-                return CandidateResult(False, {}, {}, [], ["semgrep returned an incomplete scan report"])
 
             hits_by_path: dict[str, int] = {}
             for finding in payload.get("results", []):

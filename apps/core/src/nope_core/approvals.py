@@ -50,6 +50,7 @@ def request(db: Session, scar: Scar, actor: str, revision_id: str) -> dict[str, 
     db.add(AuditEvent(id=packet["request_id"], scar_id=scar.id, organization_id=scar.organization_id, actor=actor,
                       action="scar.approval_requested", occurred_at=now,
                       detail=json.dumps(packet, sort_keys=True)))
+    db.flush()
     return packet
 
 

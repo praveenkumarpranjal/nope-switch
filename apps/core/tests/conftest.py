@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 repo_root = Path(__file__).resolve().parents[3]
-# Tests must not touch a developer's real local ledger.
-os.environ["DATABASE_URL"] = f"sqlite:///{repo_root / '.data' / 'test-nope.db'}"
+# Isolate both the developer ledger and any other concurrent pytest process.
+os.environ["DATABASE_URL"] = f"sqlite:///{repo_root / '.data' / f'test-nope-{os.getpid()}.db'}"
 os.environ["NOPE_API_KEYS"] = "admin:admin,approver:approver,agent:agent,ci:ci"
 os.environ["NOPE_ENV"] = "test"
 os.environ["NOPE_SCAN_ROOT"] = str(repo_root)
