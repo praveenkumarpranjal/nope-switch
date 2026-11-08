@@ -54,3 +54,13 @@ def test_skipped_safe_fixture_is_not_evidence_of_a_pass(monkeypatch: pytest.Monk
     assert result.good_hits["good.ts"] == 0
     assert result.passed is False
     assert "not scanned: good/good.ts" in result.rule_errors[0]
+
+
+@pytest.mark.parametrize("payload", [None, [], {}, {"results": [], "errors": None},
+    {"results": [None], "errors": []}, {"results": [], "errors": [], "paths": None}])
+def test_malformed_scanner_output_fails_without_crashing(payload: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("nope_core.rule_lab.shutil.which", lambda _: "semgrep")
+    monkeypatch.setattr("nope_core.rule_lab.subprocess.run", lambda args, **kw:
+                        subprocess.CompletedProcess(args, 0, json.dumps(payload), ""))
+    result = RuleLab().validate(RULE, [("original.ts", BAD)], [("corrected.ts", GOOD)])
+    assert not result.passed and result.rule_errors

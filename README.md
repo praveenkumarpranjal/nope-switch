@@ -92,6 +92,9 @@ The offline script uses the checked-in bad fixture, so no external model or chat
 
 ## Architecture
 
+Repeatable backend, real HTTP, Docker/PostgreSQL and TypeScript checks are in
+[backend verification](docs/backend-verification.md).
+
 The optional [`nope-room` integration](docs/switch-live-demo.md) adds verified
 Switch discovery, real room-message capture, courtroom evidence publication,
 advisory Scar documents, paired compliance scoring, approval-gated PR preparation,

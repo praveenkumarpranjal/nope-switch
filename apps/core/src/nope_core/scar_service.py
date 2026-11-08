@@ -240,13 +240,14 @@ def generate_active_rules_yaml(db: Session) -> str:
         revision = assurance.active(db, scar)
         if revision is None:
             raise ValueError(f"SCAR-{scar.number:03d} lacks revision evidence; revalidate, challenge, approve and activate it")
+        approvals.verify_approved(db, scar, revision)
         latest_rule_version = db.get(RuleVersionModel, revision.rule_id)
         if not latest_rule_version or not latest_rule_version.rule_yaml.strip():
-            continue
+            raise ValueError(f"SCAR-{scar.number:03d} has no active rule content")
         try:
             doc = yaml.safe_load(latest_rule_version.rule_yaml)
-        except Exception:
-            continue
+        except yaml.YAMLError as exc:
+            raise ValueError(f"SCAR-{scar.number:03d} has invalid active rule YAML") from exc
         rules: list[Any] = []
         if isinstance(doc, dict) and "rules" in doc and isinstance(doc["rules"], list):
             rules = doc["rules"]
@@ -269,5 +270,8 @@ def generate_active_rules_yaml(db: Session) -> str:
                                  "tests": base + "/tests", "history": f"/v1/scars/{scar.number}/provenance",
                                  "remediation": scar.remediation})
                 merged_rules.append(rule_copy)
+    ids = [rule.get("id") for rule in merged_rules]
+    if len(ids) != len(set(ids)):
+        raise ValueError("Active rules contain duplicate rule IDs; refusing an ambiguous policy export")
     return yaml.safe_dump({"rules": merged_rules}, sort_keys=False)
 

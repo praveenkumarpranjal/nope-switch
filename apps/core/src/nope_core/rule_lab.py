@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from nope_core.scan_report import checked_report
 
 
 class RuleLabError(RuntimeError):
@@ -111,23 +112,20 @@ class RuleLab:
                 *(str(path) for path in scanned),
             ]
             try:
-                completed = subprocess.run(command, capture_output=True, text=True, timeout=self.timeout_seconds, check=False)
+                completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=self.timeout_seconds, check=False)
             except subprocess.TimeoutExpired:
                 return CandidateResult(False, {}, {}, [], [f"semgrep exceeded {self.timeout_seconds} seconds"])
             except OSError as exc:
                 return CandidateResult(False, {}, {}, [], [f"semgrep could not start: {exc}"])
 
             try:
-                payload = json.loads(completed.stdout or "{}")
-            except json.JSONDecodeError:
+                payload = checked_report(json.loads(completed.stdout or "{}"))
+            except ValueError:
                 detail = (completed.stderr or completed.stdout).strip()[:800]
                 return CandidateResult(False, {}, {}, [], [f"semgrep returned invalid JSON: {detail}"])
 
             if completed.returncode not in (0, 1):
                 return CandidateResult(False, {}, {}, [], [f"semgrep exited with status {completed.returncode}"])
-            if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
-                return CandidateResult(False, {}, {}, [], ["semgrep returned an incomplete scan report"])
-
             hits_by_path: dict[str, int] = {}
             for finding in payload.get("results", []):
                 location = finding.get("path")

@@ -4,10 +4,18 @@ import concurrent.futures
 import json
 from typing import Any, cast
 
+import pytest
 from fastapi.testclient import TestClient
 from nope_core.db import AuditEvent, Base, ScarCounter, SessionLocal, engine
 from nope_core.main import app
 from sqlalchemy import delete, select
+
+
+@pytest.mark.parametrize("identifier", ["²", "9" * 5000])
+def test_unrepresentable_scar_number_returns_not_found(identifier: str) -> None:
+    with TestClient(app) as client:
+        response = client.get(f"/v1/scars/{identifier}", headers={"X-NOPE-Key": "agent"})
+    assert response.status_code == 404
 
 
 def reset_schema() -> None:

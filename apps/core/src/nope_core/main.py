@@ -20,9 +20,11 @@ from nope_core.db import (
     Scar,
     SessionLocal,
     WebhookDelivery,
+    engine,
     init_db,
     new_id,
 )
+from nope_core.gitops import GitHubUnavailable, verify_merged_rule
 from nope_core.rule_lab import RuleLab, RuleLabError
 from nope_core.schemas import (
     AdversarialRequest,
@@ -35,7 +37,7 @@ from nope_core.schemas import (
     ScarStatus,
     ValidateScarRequest,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -43,7 +45,10 @@ from sqlalchemy.orm import Session
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     init_db()
-    yield
+    try:
+        yield
+    finally:
+        engine.dispose()
 
 
 app = FastAPI(title="NOPE Never-Again Compiler", version="1.0.0", docs_url="/docs", redoc_url=None, lifespan=lifespan)
@@ -69,12 +74,22 @@ def create_scar(payload: CreateScarRequest, actor: AgentRequired) -> dict[str, A
         return scar_service.scar_response(scar).model_dump(mode="json")
 
 
-def _load_scar(db: Session, scar_id_or_number: str) -> Scar | None:
-    scar: Scar | None = db.get(Scar, scar_id_or_number)
+def _load_scar(db: Session, scar_id_or_number: str, *, for_update: bool = False) -> Scar | None:
+    if for_update and db.get_bind().dialect.name == "sqlite":
+        # SQLite ignores FOR UPDATE. Take its write lock before reading a
+        # candidate so validation, challenge and approval cannot overwrite one another.
+        db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+    query = select(Scar).where(Scar.id == scar_id_or_number)
+    if for_update:
+        query = query.with_for_update()
+    scar = db.scalar(query)
     if scar is not None:
         return scar
-    if scar_id_or_number.isdigit():
-        scar = db.scalar(select(Scar).where(Scar.number == int(scar_id_or_number)))
+    if scar_id_or_number.isascii() and scar_id_or_number.isdigit() and len(scar_id_or_number) <= 10:
+        query = select(Scar).where(Scar.number == int(scar_id_or_number))
+        if for_update:
+            query = query.with_for_update()
+        scar = db.scalar(query)
         return scar
     return None
 
@@ -91,7 +106,7 @@ def get_scar(scar_id_or_number: str, _: AgentRequired) -> dict[str, Any]:
 @app.post("/v1/scars/{scar_id_or_number}/validate")
 def validate_scar(scar_id_or_number: str, payload: ValidateScarRequest, actor: AgentRequired) -> dict[str, Any]:
     with SessionLocal() as db:
-        scar = _load_scar(db, scar_id_or_number)
+        scar = _load_scar(db, scar_id_or_number, for_update=True)
         if not scar:
             raise HTTPException(status_code=404, detail="Scar not found")
         try:
@@ -129,7 +144,7 @@ def validate_scar(scar_id_or_number: str, payload: ValidateScarRequest, actor: A
 @app.post("/v1/scars/{scar_id_or_number}/adversarial")
 def adversarial_scar(scar_id_or_number: str, payload: AdversarialRequest, actor: AgentRequired) -> dict[str, Any]:
     with SessionLocal() as db:
-        scar = _load_scar(db, scar_id_or_number)
+        scar = _load_scar(db, scar_id_or_number, for_update=True)
         if scar is None:
             raise HTTPException(404, "Scar not found")
         revision = assurance.latest(db, scar)
@@ -147,7 +162,7 @@ def adversarial_scar(scar_id_or_number: str, payload: AdversarialRequest, actor:
 @app.post("/v1/scars/{scar_id_or_number}/reject")
 def reject_scar(scar_id_or_number: str, payload: ApprovalRequest, actor: ApproverRequired) -> dict[str, Any]:
     with SessionLocal() as db:
-        scar = _load_scar(db, scar_id_or_number)
+        scar = _load_scar(db, scar_id_or_number, for_update=True)
         if scar is None:
             raise HTTPException(404, "Scar not found")
         revision = assurance.latest(db, scar)
@@ -200,7 +215,7 @@ def revision_artifact(scar_id_or_number: str, revision_id: str, artifact: str, _
 @app.post("/v1/scars/{scar_id_or_number}/approval-request")
 def request_approval(scar_id_or_number: str, payload: ApprovalProposalRequest, actor: AgentRequired) -> dict[str, Any]:
     with SessionLocal() as db:
-        scar = _load_scar(db, scar_id_or_number)
+        scar = _load_scar(db, scar_id_or_number, for_update=True)
         if scar is None:
             raise HTTPException(404, "Scar not found")
         try:
@@ -214,7 +229,7 @@ def request_approval(scar_id_or_number: str, payload: ApprovalProposalRequest, a
 @app.post("/v1/scars/{scar_id_or_number}/approve")
 def approve_scar(scar_id_or_number: str, payload: ApprovalDecisionRequest, actor: ApproverRequired) -> dict[str, Any]:
     with SessionLocal() as db:
-        scar = _load_scar(db, scar_id_or_number)
+        scar = _load_scar(db, scar_id_or_number, for_update=True)
         if not scar:
             raise HTTPException(status_code=404, detail="Scar not found")
         try:
@@ -236,7 +251,7 @@ def activate_scar(
     Requires Admin permissions and an audited justification.
     """
     with SessionLocal() as db:
-        scar = _load_scar(db, scar_id_or_number)
+        scar = _load_scar(db, scar_id_or_number, for_update=True)
         if not scar:
             raise HTTPException(status_code=404, detail="Scar not found")
         try:
@@ -252,7 +267,7 @@ def activate_scar(
 @app.post("/v1/scars/{scar_id_or_number}/challenge", status_code=202)
 def challenge_scar(scar_id_or_number: str, payload: ChallengeRequest, actor: AgentRequired) -> dict[str, Any]:
     with SessionLocal() as db:
-        scar = _load_scar(db, scar_id_or_number)
+        scar = _load_scar(db, scar_id_or_number, for_update=True)
         if not scar:
             raise HTTPException(status_code=404, detail="Scar not found")
         replacement = None
@@ -294,6 +309,8 @@ def ci_failure(payload: CiFailure, actor: CiRequired) -> dict[str, Any]:
         scar = scar_service.get_scar_by_number(db, payload.scar_number)
         if not scar:
             raise HTTPException(status_code=404, detail="Scar not found")
+        if payload.repository != scar.repository:
+            raise HTTPException(409, "CI failure repository does not match the Scar scope")
         revision = db.get(assurance.Revision, payload.revision_id) if payload.revision_id else assurance.active(db, scar)
         if revision is not None and (revision.scar_id != scar.id or revision.state not in {"active", "superseded"}):
             raise HTTPException(409, "CI failure must reference an activated revision of this Scar")
@@ -350,24 +367,53 @@ def _verify_github_signature(raw_body: bytes, signature_header: str | None, secr
     if not signature_header or not signature_header.startswith("sha256="):
         return False
     expected = "sha256=" + hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(signature_header, expected)
+    return hmac.compare_digest(signature_header.encode("utf-8"), expected.encode("utf-8"))
+
+
+class GitHubRepository(BaseModel):
+    full_name: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", max_length=200)
+
+
+class GitHubBase(BaseModel):
+    ref: str = Field(min_length=1, max_length=250)
+    repo: GitHubRepository
+
+
+class GitHubHead(BaseModel):
+    ref: str = Field(min_length=1, max_length=250)
+
+
+class GitHubUser(BaseModel):
+    login: str = Field(min_length=1, max_length=200)
+
+
+class MergePullRequest(BaseModel):
+    number: int = Field(ge=1)
+    merge_commit_sha: str = Field(pattern=r"^[a-f0-9]{40}$")
+    base: GitHubBase
+    head: GitHubHead
+    merged_by: GitHubUser | None = None
+    user: GitHubUser | None = None
+    title: str | None = Field(default=None, max_length=256)
+    body: str | None = Field(default=None, max_length=65536)
+    html_url: str | None = None
 
 
 def _extract_scar_number_from_pr(pr_data: dict[str, Any]) -> int | None:
     head_ref = str(pr_data.get("head", {}).get("ref") or "")
     match = re.search(r"(?:^|/)(?:nope/)?scar-(\d+)", head_ref, re.IGNORECASE)
     if match:
-        return int(match.group(1))
+        return int(match.group(1)) if len(match.group(1)) <= 10 else None
 
     title = str(pr_data.get("title") or "")
     match = re.search(r"scar[-\s#]*(\d+)", title, re.IGNORECASE)
     if match:
-        return int(match.group(1))
+        return int(match.group(1)) if len(match.group(1)) <= 10 else None
 
     body = str(pr_data.get("body") or "")
     match = re.search(r"scar[-\s#]*(\d+)", body, re.IGNORECASE)
     if match:
-        return int(match.group(1))
+        return int(match.group(1)) if len(match.group(1)) <= 10 else None
 
     return None
 
@@ -375,12 +421,17 @@ def _extract_scar_number_from_pr(pr_data: dict[str, Any]) -> int | None:
 @app.post("/v1/webhooks/github")
 async def github_webhook(request: Request) -> dict[str, Any]:
     content_length = request.headers.get("content-length")
-    if content_length and int(content_length) > 1_048_576:
-        raise HTTPException(status_code=413, detail="Webhook payload exceeds 1MB limit")
-
-    raw_body = await request.body()
-    if len(raw_body) > 1_048_576:
-        raise HTTPException(status_code=413, detail="Webhook payload exceeds 1MB limit")
+    if content_length:
+        if not content_length.isascii() or not content_length.isdigit() or len(content_length) > 12:
+            raise HTTPException(400, "Invalid Content-Length")
+        if int(content_length) > 1_048_576:
+            raise HTTPException(status_code=413, detail="Webhook payload exceeds 1MB limit")
+    chunks = bytearray()
+    async for chunk in request.stream():
+        chunks.extend(chunk)
+        if len(chunks) > 1_048_576:
+            raise HTTPException(status_code=413, detail="Webhook payload exceeds 1MB limit")
+    raw_body = bytes(chunks)
 
     secret = os.getenv("GITHUB_WEBHOOK_SECRET") or settings.github_webhook_secret
     if not secret:
@@ -405,6 +456,8 @@ async def github_webhook(request: Request) -> dict[str, Any]:
 
     try:
         payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+        if not isinstance(payload, dict):
+            raise ValueError("Webhook body must be an object")
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Malformed JSON body") from exc
 
@@ -415,6 +468,11 @@ async def github_webhook(request: Request) -> dict[str, Any]:
 
     if action != "closed" or pr.get("merged") is not True:
         return {"status": "ignored", "reason": "Pull request is not closed and merged"}
+
+    try:
+        pr = MergePullRequest.model_validate(pr).model_dump()
+    except ValidationError as exc:
+        raise HTTPException(400, "Malformed merged pull request metadata") from exc
 
     # Guard: Ensure PR was merged into the protected base branch
     base_ref = pr.get("base", {}).get("ref")
@@ -434,13 +492,17 @@ async def github_webhook(request: Request) -> dict[str, Any]:
     head_ref = pr.get("head", {}).get("ref") or ""
 
     with SessionLocal() as db:
+        scar = _load_scar(db, str(scar_number), for_update=True)
+        if delivery_id and db.get(WebhookDelivery, delivery_id):
+            return {"status": "already_processed", "delivery_id": delivery_id}
         if delivery_id:
             db.add(WebhookDelivery(id=delivery_id, event=event or "pull_request", status="processed"))
-
-        scar = scar_service.get_scar_by_number(db, scar_number)
         if not scar:
             db.commit()
             return {"status": "ignored", "reason": f"Scar #{scar_number} not found"}
+
+        if pr["base"]["repo"]["full_name"] != scar.repository:
+            raise HTTPException(409, "Merged pull request repository does not match the approved Scar scope")
 
         if scar.active and scar.status != ScarStatus.APPROVED.value:
             db.commit()
@@ -470,7 +532,26 @@ async def github_webhook(request: Request) -> dict[str, Any]:
             }
 
         try:
+            revision = assurance.latest(db, scar)
+            if revision is None:
+                raise ValueError("The merged PR has no approved candidate")
+            binding = re.search(r"<!-- nope-approval: (\{[^\n]*\}) -->", pr.get("body") or "")
+            if not binding:
+                raise ValueError("Merged PR must contain its exact nope-approval evidence binding")
+            try:
+                bound = json.loads(binding.group(1))
+            except ValueError as exc:
+                raise ValueError("Merged PR approval binding is malformed") from exc
+            if (not isinstance(bound, dict) or bound.get("revision_id") != revision.id
+                    or bound.get("evidence_sha256") != approvals.evidence_hash(db, scar, revision)):
+                raise ValueError("Merged PR approval binding is stale or belongs to another candidate")
+            rule = db.get(RuleVersion, revision.rule_id)
+            if rule is None:
+                raise ValueError("Approved rule is missing")
+            verify_merged_rule(scar.repository, merge_commit_sha, rule.sha256)
             scar_service.activate_scar(db, scar, f"github:{merged_by}")
+        except GitHubUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
         db.add(

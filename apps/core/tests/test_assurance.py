@@ -205,6 +205,49 @@ def test_activation_rechecks_approved_scope(client: TestClient) -> None:
     assert rejected.status_code == 409 and "evidence hash" in rejected.text
 
 
+def test_concurrent_revisions_have_distinct_monotonic_sequences(client: TestClient) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    scar = create(client)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        revisions = list(pool.map(lambda _: validate(client, scar), range(4)))
+    assert len({item["revision_id"] for item in revisions}) == 4
+    stored = client.get(f"/v1/scars/{scar}/provenance", headers=AGENT).json()["revisions"]
+    assert [revision["sequence"] for revision in stored] == [1, 2, 3, 4]
+
+
+def test_active_export_rejects_altered_evidence(client: TestClient) -> None:
+    import json
+
+    from nope_core.assurance import Revision
+    from nope_core.db import SessionLocal
+
+    scar = create(client)
+    candidate = validate(client, scar)
+    client.post(f"/v1/scars/{scar}/adversarial", headers=ADVERSARY, json=bundle())
+    activate(client, scar)
+    with SessionLocal() as db:
+        stored = db.get(Revision, candidate["revision_id"])
+        assert stored is not None
+        report = json.loads(stored.report)
+        report["replay"]["original_detected"] = False
+        stored.report = json.dumps(report)
+        db.commit()
+    response = client.get("/v1/rules/active.yml", headers=AGENT)
+    assert response.status_code == 409 and "evidence hash" in response.text
+
+
+def test_ci_report_cannot_claim_another_repositorys_scar(client: TestClient) -> None:
+    scar = create(client)
+    validate(client, scar)
+    client.post(f"/v1/scars/{scar}/adversarial", headers=ADVERSARY, json=bundle())
+    activate(client, scar)
+    response = client.post("/v1/ci/failure", headers={"X-NOPE-Key": "ci"}, json={
+        "repository": "other/repository", "sha": "a" * 40,
+        "scar_number": int(scar), "check_url": "https://ci.example/run/1"})
+    assert response.status_code == 409 and "repository" in response.text
+
+
 def test_replay_and_separate_agent_are_required(client: TestClient) -> None:
     scar = create(client)
     evidence = validate(client, scar)

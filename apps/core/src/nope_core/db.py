@@ -15,6 +15,7 @@ from sqlalchemy import (
     func,
     select,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 
@@ -147,7 +148,7 @@ def init_db() -> None:
             db.add(ScarCounter(name="scars", current_value=int(max_num)))
             try:
                 db.commit()
-            except Exception:
+            except IntegrityError:
                 db.rollback()
 
 

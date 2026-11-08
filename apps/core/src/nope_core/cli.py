@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import tempfile
 from pathlib import Path
+from typing import Any
 
 import httpx
 import yaml
@@ -44,6 +46,14 @@ def parse_examples(values: list[str]) -> list[dict[str, str]]:
     return examples
 
 
+def rules_document(text: str) -> list[dict[str, Any]]:
+    document = yaml.safe_load(text)
+    if (not isinstance(document, dict) or not isinstance(document.get("rules"), list)
+            or any(not isinstance(rule, dict) for rule in document["rules"])):
+        raise ValueError("Active policy must contain an explicit rules list")
+    return list(document["rules"])
+
+
 def verify_rules_sync(rule_file: Path, base_url: str | None = None, key: str | None = None) -> int:
     target_url = (base_url or BASE_URL).rstrip("/") + "/v1/rules/active.yml"
     headers = {"X-NOPE-Key": key or CI_KEY}
@@ -62,14 +72,11 @@ def verify_rules_sync(rule_file: Path, base_url: str | None = None, key: str | N
 
     local_yaml_str = rule_file.read_text(encoding="utf-8")
     try:
-        remote_doc = yaml.safe_load(remote_yaml_str) or {}
-        local_doc = yaml.safe_load(local_yaml_str) or {}
+        remote_rules = rules_document(remote_yaml_str)
+        local_rules = rules_document(local_yaml_str)
     except Exception as exc:
         print(f"NOPE: YAML parsing error: {exc}")
         return 1
-
-    remote_rules = remote_doc.get("rules", []) if isinstance(remote_doc, dict) else []
-    local_rules = local_doc.get("rules", []) if isinstance(local_doc, dict) else []
 
     if remote_rules == local_rules:
         print(f"NOPE: Rule file '{rule_file}' is in sync with active rules ({len(local_rules)} rules).")
@@ -77,7 +84,7 @@ def verify_rules_sync(rule_file: Path, base_url: str | None = None, key: str | N
 
     print(f"NOPE: Drift detected between '{rule_file}' and database active rules!")
     remote_ids = {r.get("id") for r in remote_rules if isinstance(r, dict)}
-    local_ids = {r.get("id") for r in local_rules if isinstance(local_doc, dict) and isinstance(r, dict)}
+    local_ids = {r.get("id") for r in local_rules}
 
     missing_in_local = remote_ids - local_ids
     extra_in_local = local_ids - remote_ids
@@ -102,8 +109,21 @@ def sync_rules_to_file(output_path: Path, base_url: str | None = None, key: str 
             return 1
         remote_yaml_str = resp.text
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(remote_yaml_str, encoding="utf-8")
+    temporary: Path | None = None
+    try:
+        rules_document(remote_yaml_str)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output_path.parent,
+                                         prefix=".nope-rules-", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(remote_yaml_str)
+        temporary.replace(output_path)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        print(f"NOPE: Unable to sync valid policy: {exc}")
+        return 1
+    finally:
+        if temporary:
+            temporary.unlink(missing_ok=True)
     print(f"NOPE: Successfully synced active rules to '{output_path}'.")
     return 0
 
