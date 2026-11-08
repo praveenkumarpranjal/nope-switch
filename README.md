@@ -15,9 +15,21 @@ This repository is **the product, not just a hack**: it contains the workflow pl
 
 > Hackathon: Flip the Switch (Nov 4–7 2026) | Track: Best Business Workflow | Sponsor license applies to submitted artefacts. The source remains MIT licensed for this project.
 
+## How Switch is used
+
+NOPE is designed natively around Switch rooms and multi-agent coordination:
+
+1. **The Room**: The incident postmortem or engineering channel (e.g. `#incidents`) is bridged directly into Switch (Console / Mattermost bridge). All context originates where engineers discuss what broke.
+2. **The `@nope` Agent**: An autonomous agent resides in the room following [`switch/nope-agent/brief.md`](switch/nope-agent/brief.md). It monitors room threads, acknowledges `@nope teach <incident>`, extracts invariants, and queries developers for scope and rollout boundaries.
+3. **Approval Happening in the Room**: After the rule candidate passes Rule Lab replay and an independent adversarial challenge, NOPE issues a cryptographic approval ticket (`evidence_sha256`). A human engineer must approve the proposal in the room (`@nope approve <rationale>`). The agent is strictly forbidden from self-signing human approvals.
+4. **CI Results Posted Back to the Room**: When CI detects a violation on a Pull Request, the CI gate (`nope-room` / `scripts/enforce.sh`) posts the structured evidence bundle directly back to the Switch room, linking the exact failing code line back to the original postmortem message, invariant, and remediation.
+
+> **Note on Rule Synthesis**: The built-in dispatcher simulator uses a deterministic reference rule (`pattern: leakCredential($X)`) for automated testing and reproducible demos; in production deployments, the coding agent following [`switch/nope-agent/brief.md`](switch/nope-agent/brief.md) investigates the target repository and writes bespoke Semgrep rules and test fixtures.
+
 ## What you get
 
 - **`@nope` Switch agent brief** — a reviewable brief that makes the coding agent use the workbench instead of improvising against production.
+- **Switch Room Runtime & CLI (`nope_switch`)** — Console transport client, live room listener, evidence generator, automated PR creator, and the `nope-room` CLI.
 - **nope-core** — FastAPI backend with an append-only Scar Ledger, PostgreSQL support, SQLite for local development, API-key RBAC and OpenAPI.
 - **Async validation queue** — `POST /v1/scars/{id}/validate` returns `202 Accepted`; a dedicated `nope-worker` process executes Semgrep jobs and updates `GET /v1/validations/{job_id}`.
 - **Rule Lab** — validates generated rules against:
@@ -34,7 +46,7 @@ This repository is **the product, not just a hack**: it contains the workflow pl
 Requirements: Python 3.12+, Node 20+, Semgrep, Git, Switch and one supported coding agent.
 
 ```sh
-git clone <url-for-this-repository>
+git clone https://github.com/praveenkumarpranjal/nope-switch.git
 cd nope-switch
 cp .env.example .env  # replace demo keys for production
 uv sync --extra dev --extra semgrep
@@ -76,21 +88,6 @@ uv run nope-demo scan-bad
 
 `scan-bad` exits with `42` and prints the Scar reference, reason and remediation.
 
-### Demo with no network or no agent
-
-```sh
-uv run nope-demo reset
-uv run nope-demo teach
-uv run nope-demo validate
-uv run nope-demo adversarial
-uv run nope-demo approve 1
-uv run nope-demo activate 1
-uv run nope-demo scan-good
-uv run nope-demo scan-bad
-```
-
-The offline script uses the checked-in bad fixture, so no external model or chat is needed to see the full enforce/fail path. The Docker/Postgres path is in `docker-compose.yml`; replace all demo keys for any shared deployment.
-
 ## Architecture
 
 Scars now require [counterfactual replay, an independent adversarial challenge,
@@ -127,6 +124,7 @@ The critical boundary is intentional: **the agent does the judgment; nope-core d
 apps/core/                 production FastAPI service and CLI
 apps/core/tests/           API, auth, RBAC, validation and scar-lifecycle tests
 apps/core/src/nope_core/   domain logic (no LLM code in the safety path)
+apps/switch/               Switch Console client, room listener, evidence generator, and nope-room CLI
 config/.semgrep/           active rule pack checked into target repos
 demo-app/                  strict TypeScript service and fixtures
 switch/nope-agent/         Switch brief, permissions, setup and operator notes
@@ -156,3 +154,20 @@ CI runs unit tests, the demo target test suite, checks the shipped Semgrep pack 
 - Automatic merging. Humans always approve scars and exceptions.
 - Cross-repo automatic rollout. Jobs may propose the same scar in another service, but they may not install it without a room approval.
 - Guarantees for arbitrary, unseen languages. The MVP supports TypeScript/JavaScript well and Python as a secondary target; other languages need a rule pack with real fixtures and a human review.
+
+## Backup: Offline Demo (No Network or Agent Required)
+
+If evaluating offline without an active Switch room or external LLM connections, you can run the deterministic local demo:
+
+```sh
+uv run nope-demo reset
+uv run nope-demo teach
+uv run nope-demo validate
+uv run nope-demo adversarial
+uv run nope-demo approve 1
+uv run nope-demo activate 1
+uv run nope-demo scan-good
+uv run nope-demo scan-bad
+```
+
+The offline script uses the checked-in bad fixture (`demo-app/fixtures/`), demonstrating the complete Rule Lab validation, independent adversarial challenge, evidence-bound approval, and CI gate rejection (`exit 42`) without external dependencies. The full Docker/PostgreSQL multi-process stack is configured in `docker-compose.yml`.
