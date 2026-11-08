@@ -178,10 +178,13 @@ def _create_approved_scar(client: TestClient) -> dict[str, Any]:
     assert challenge.status_code == 200, challenge.text
     assert challenge.json()["passed"] is True
 
+    requested = client.post(f"/v1/scars/{scar_id}/approval-request", headers={"X-NOPE-Key": "agent"},
+                            json={"revision_id": val_resp.json()["revision_id"]})
+    assert requested.status_code == 200, requested.text
     appr_resp = client.post(
         f"/v1/scars/{scar_id}/approve",
         headers={"X-NOPE-Key": "approver"},
-        json={"approver": "alice@acme.com", "reason": "Verified in test lab"},
+        json={**requested.json(), "approver": "alice@acme.com", "reason": "Verified in test lab"},
     )
     assert appr_resp.status_code == 200
     assert appr_resp.json()["status"] == ScarStatus.APPROVED.value

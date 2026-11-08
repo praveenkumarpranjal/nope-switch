@@ -130,10 +130,13 @@ def test_break_glass_activation_requires_admin_and_audits() -> None:
         assert challenge.status_code == 200
 
         # Approve scar
+        requested = client.post(f"/v1/scars/{scar_id}/approval-request", headers={"X-NOPE-Key": "agent"},
+                                json={"revision_id": val_resp.json()["revision_id"]})
+        assert requested.status_code == 200, requested.text
         appr_resp = client.post(
             f"/v1/scars/{scar_id}/approve",
             headers={"X-NOPE-Key": "approver"},
-            json={"approver": "lead@acme.com", "reason": "Immediate zero-day approval"},
+            json={**requested.json(), "approver": "lead@acme.com", "reason": "Immediate zero-day approval"},
         )
         assert appr_resp.status_code == 200
 

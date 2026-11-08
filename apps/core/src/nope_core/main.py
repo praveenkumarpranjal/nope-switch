@@ -12,7 +12,14 @@ from typing import Any, cast
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
-from nope_core import assurance, metrics, scar_service, validation_jobs, validation_pipeline
+from nope_core import (
+    approvals,
+    assurance,
+    metrics,
+    scar_service,
+    validation_jobs,
+    validation_pipeline,
+)
 from nope_core.auth import (
     AdminRequired,
     AgentRequired,
@@ -36,6 +43,8 @@ from nope_core.db import (
 from nope_core.rule_lab import RuleLab, RuleLabError
 from nope_core.schemas import (
     AdversarialRequest,
+    ApprovalDecisionRequest,
+    ApprovalProposalRequest,
     ApprovalRequest,
     ApproveExceptionRequest,
     BreakGlassActivationRequest,
@@ -273,10 +282,12 @@ def scar_provenance(scar_id_or_number: str, actor: CiRequired) -> dict[str, Any]
                               .order_by(assurance.Revision.sequence)).all()
         events = db.scalars(select(AuditEvent).where(AuditEvent.scar_id == scar.id)
                            .order_by(AuditEvent.occurred_at, AuditEvent.id)).all()
+        rule_shas = {rule.id: rule.sha256 for rule in db.scalars(select(RuleVersion).where(RuleVersion.scar_id == scar.id))}
         return {"scar": scar_service.scar_response(scar).model_dump(mode="json"),
-                "revisions": [{"id": r.id, "sequence": r.sequence, "rule_id": r.rule_id,
+                "revisions": [{"id": r.id, "sequence": r.sequence, "rule_id": r.rule_id, "rule_sha256": rule_shas.get(r.rule_id),
                                "state": r.state, "author": r.author, "adversary": r.adversary,
-                               "report": _safe_json_loads(r.report, {}), "challenge": _safe_json_loads(r.challenge)}
+                               "evidence_sha256": approvals.evidence_hash(db, scar, r),
+                               "report": _safe_json_loads(r.report, {}), "challenge": _safe_json_loads(r.challenge) if r.challenge else None}
                               for r in revisions],
                 "decisions": [{"id": e.id, "actor": e.actor, "action": e.action,
                                "occurred_at": e.occurred_at.isoformat(), "detail": _safe_json_loads(e.detail, {})} for e in events]}
@@ -298,8 +309,22 @@ def revision_artifact(scar_id_or_number: str, revision_id: str, artifact: str, a
         raise HTTPException(404, "Artifact not found")
 
 
+@app.post("/v1/scars/{scar_id_or_number}/approval-request")
+def request_approval(scar_id_or_number: str, payload: ApprovalProposalRequest, actor: AgentRequired) -> dict[str, Any]:
+    with SessionLocal() as db:
+        scar = _load_scar(db, scar_id_or_number, organization_id=actor.organization)
+        if scar is None:
+            raise HTTPException(404, "Scar not found")
+        try:
+            packet = approvals.request(db, scar, actor, payload.revision_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        db.commit()
+        return packet
+
+
 @app.post("/v1/scars/{scar_id_or_number}/approve")
-def approve_scar(scar_id_or_number: str, payload: ApprovalRequest, actor: ApproverRequired) -> dict[str, Any]:
+def approve_scar(scar_id_or_number: str, payload: ApprovalDecisionRequest, actor: ApproverRequired) -> dict[str, Any]:
     with SessionLocal() as db:
         scar = _load_scar(db, scar_id_or_number, organization_id=actor.organization)
         if not scar:
@@ -309,9 +334,8 @@ def approve_scar(scar_id_or_number: str, payload: ApprovalRequest, actor: Approv
                 status_code=403,
                 detail=f"Identity impersonation forbidden: authenticated as '{actor.subject}', cannot approve as '{payload.approver}'",
             )
-        approver_identity = actor.subject if (actor.is_user_identity or not payload.approver) else payload.approver
         try:
-            scar = scar_service.approve_scar(db, scar, actor, approver_identity, payload.reason)
+            scar = scar_service.approve_scar(db, scar, actor, payload)
             db.commit()
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc

@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: nope
       POSTGRES_USER: nope
@@ -15,6 +16,7 @@ services:
 
   nope-core:
     build: .
+    restart: unless-stopped
     ports:
       - "8010:8010"
     environment:
@@ -31,6 +33,7 @@ services:
 
   nope-worker:
     build: .
+    restart: unless-stopped
     command: ["nope", "worker", "--poll-interval", "1"]
     environment:
       DATABASE_URL: postgresql+psycopg://nope:${NOPE_DB_PASSWORD:-nope-local-only-change-me}@postgres:5432/nope

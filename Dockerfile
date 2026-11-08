@@ -1,8 +1,8 @@
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 WORKDIR /app
-COPY pyproject.toml README.md ./
+COPY pyproject.toml uv.lock README.md ./
 COPY apps ./apps
-RUN uv sync --no-dev --extra semgrep --no-editable
+RUN uv sync --frozen --no-dev --extra semgrep --no-editable
 
 FROM python:3.12-slim-bookworm
 ENV PATH="/app/.venv/bin:${PATH}" PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1

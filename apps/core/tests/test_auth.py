@@ -159,11 +159,19 @@ def test_anti_impersonation_in_approvals() -> None:
         )
         assert chal_resp.status_code == 200
 
+        requested = client.post(
+            f"/v1/scars/{scar_id}/approval-request",
+            headers={"Authorization": f"Bearer {agent_token}"},
+            json={"revision_id": val_resp.json()["revision_id"]},
+        )
+        assert requested.status_code == 200
+        ticket = requested.json()
+
         # Attempt to approve as bob@acme.com using Alice's token -> MUST BE REJECTED 403
         impersonation = client.post(
             f"/v1/scars/{scar_id}/approve",
             headers={"Authorization": f"Bearer {alice_token}"},
-            json={"approver": "bob@acme.com", "reason": "Attempting to forge Bob's identity"},
+            json={**ticket, "approver": "bob@acme.com", "reason": "Attempting to forge Bob's identity"},
         )
         assert impersonation.status_code == 403
         assert "Identity impersonation forbidden" in impersonation.json()["detail"]
@@ -172,7 +180,7 @@ def test_anti_impersonation_in_approvals() -> None:
         approved = client.post(
             f"/v1/scars/{scar_id}/approve",
             headers={"Authorization": f"Bearer {alice_token}"},
-            json={"approver": "alice@acme.com", "reason": "Legitimate approval by verified Alice"},
+            json={**ticket, "approver": "alice@acme.com", "reason": "Legitimate approval by verified Alice"},
         )
         assert approved.status_code == 200
         assert approved.json()["status"] == "approved"

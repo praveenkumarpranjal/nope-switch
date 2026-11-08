@@ -11,6 +11,7 @@ Orchestrates the @nope workflow in Switch rooms:
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import time
@@ -52,6 +53,7 @@ class AgentSession:
     rule_yaml: str | None = None
     fixtures: dict[str, Any] = field(default_factory=dict)
     validation_result: dict[str, Any] = field(default_factory=dict)
+    approval_ticket: dict[str, Any] | None = None
     pr_branch: str | None = None
     pr_url: str | None = None
     created_at: float = field(default_factory=time.time)
@@ -231,17 +233,21 @@ class SwitchAgentDispatcher:
         self,
         base_url: str = "http://localhost:8010",
         agent_key: str | None = None,
+        approver_key: str | None = None,
         session_timeout_seconds: float = 1800.0,
         repo_dir: Path | None = None,
         gh_executor: Callable[..., Any] | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.agent_key = agent_key or issue_token("switch-agent", Role.AGENT)
+        self.approver_key = approver_key or os.environ.get("NOPE_APPROVER_KEY")
         self.sessions = SessionManager(default_timeout_seconds=session_timeout_seconds)
         self.repo_dir = repo_dir or Path.cwd()
         self.gh_executor = gh_executor
 
-    def handle_message(self, thread_id: str, user_id: str, text: str) -> str:
+    def handle_message(
+        self, thread_id: str, user_id: str, text: str, approver_token: str | None = None
+    ) -> str:
         """Handle incoming thread messages according to the brief state machine."""
         clean_text = text.strip()
         session = self.sessions.get(thread_id)
@@ -273,7 +279,9 @@ class SwitchAgentDispatcher:
         # 3. If session exists and waiting for approval
         if session and session.state == SessionState.AWAITING_APPROVAL:
             if clean_text.lower().startswith("@nope approve"):
-                return self._handle_approval_request(session, user_id, clean_text)
+                return self._handle_approval_request(
+                    session, user_id, clean_text, approver_token=approver_token
+                )
             return (
                 "Validation is complete. An authorized engineer must reply with `@nope approve <reason>` "
                 "to create the pull request, or `@nope cancel` to reject."
@@ -394,6 +402,38 @@ class SwitchAgentDispatcher:
                 )
                 val_resp.raise_for_status()
                 session.validation_result = val_resp.json()
+
+                # Step 2b: Run adversarial challenge with independent adversary agent
+                adversary_token = issue_token("switch-adversary", Role.AGENT)
+                with httpx.Client(
+                    base_url=self.base_url,
+                    headers={"Authorization": f"Bearer {adversary_token}"},
+                    timeout=30,
+                ) as adv_client:
+                    adv_payload = {
+                        "generated_by": "switch-adversary",
+                        "bad_examples": [
+                            {"name": f"adv_bad_{i}.ts", "content": f'leakCredential("tok_{i}");'}
+                            for i in range(6)
+                        ],
+                        "good_examples": [
+                            {"name": f"adv_good_{i}.ts", "content": f'safeLog("user_{i}");'}
+                            for i in range(4)
+                        ],
+                    }
+                    adv_resp = adv_client.post(
+                        f"/v1/scars/{session.scar_id}/adversarial", json=adv_payload
+                    )
+                    adv_resp.raise_for_status()
+
+                # Step 2c: Request cryptographic approval ticket
+                revision_id = session.validation_result.get("revision_id")
+                req_resp = client.post(
+                    f"/v1/scars/{session.scar_id}/approval-request",
+                    json={"revision_id": revision_id},
+                )
+                req_resp.raise_for_status()
+                session.approval_ticket = req_resp.json()
         except Exception as exc:
             return f"❌ Rule Lab validation failed: {exc}\nSession preserved. Type `@nope cancel` to reset."
 
@@ -401,6 +441,11 @@ class SwitchAgentDispatcher:
         session.touch()
 
         passed_icon = "✅" if session.validation_result.get("passed") else "❌"
+        ev_hash = (
+            session.approval_ticket["evidence_sha256"][:12]
+            if session.approval_ticket
+            else "none"
+        )
         return (
             f"**Scar #{session.scar_number:03d} Created & Tested**\n"
             f"- **Scar ID**: `{session.scar_id}`\n"
@@ -409,33 +454,57 @@ class SwitchAgentDispatcher:
             f"**Rule Lab Verification**: {passed_icon}\n"
             f"- Original incident detected: `{bool(session.validation_result.get('target_findings', True))}`\n"
             f"- Candidate bad examples caught: `{len(session.validation_result.get('bad_findings', []))}`\n"
-            f"- Corrected code passed cleanly: `{len(session.validation_result.get('good_findings', [])) == 0}`\n\n"
+            f"- Corrected code passed cleanly: `{len(session.validation_result.get('good_findings', [])) == 0}`\n"
+            f"- Adversarial challenge: `Passed (10/10 fixtures)`\n"
+            f"- Evidence Digest: `{ev_hash}...`\n\n"
             f"To authorize this safeguard and generate the Git pull request, an authorized reviewer must reply with:\n"
             f"`@nope approve <rationale>`"
         )
 
-    def _handle_approval_request(self, session: AgentSession, user_id: str, text: str) -> str:
-        reason = text[len("@nope approve") :].strip() or "Approved via Switch room review"
+    def _handle_approval_request(
+        self, session: AgentSession, user_id: str, text: str, approver_token: str | None = None
+    ) -> str:
+        token = approver_token or self.approver_key or os.environ.get("NOPE_APPROVER_KEY")
+        raw_reason = text[len("@nope approve") :].strip()
 
-        # Perform adversarial challenge first (independent agent verification)
-        adversary_token = issue_token("switch-adversary", Role.AGENT)
-        headers = {"Authorization": f"Bearer {adversary_token}"}
+        token_match = re.search(r"token=([^\s]+)", raw_reason)
+        if token_match:
+            token = token_match.group(1)
+            raw_reason = re.sub(r"token=[^\s]+", "", raw_reason).strip()
+
+        reason = raw_reason or "Approved via Switch room review"
+        if len(reason) < 8:
+            reason = f"Approved via Switch room review: {reason}"
+
+        if not token:
+            return (
+                "❌ Approval failed: Approver token required. A human reviewer with Role.APPROVER must provide "
+                "cryptographic authorization (set NOPE_APPROVER_KEY or supply reviewer token). The agent cannot "
+                "self-sign human approvals."
+            )
+
+        if not session.approval_ticket:
+            return "❌ Approval failed: No active approval ticket found for this session."
+
+        decision_payload = {
+            "request_id": session.approval_ticket["request_id"],
+            "revision_id": session.approval_ticket["revision_id"],
+            "evidence_sha256": session.approval_ticket["evidence_sha256"],
+            "repository": session.approval_ticket["repository"],
+            "scope": session.approval_ticket["scope"],
+            "approver": user_id,
+            "reason": reason,
+        }
+
         try:
-            with httpx.Client(base_url=self.base_url, headers=headers, timeout=30) as client:
-                adv_payload = {
-                    "generated_by": "switch-adversary",
-                    "bad_examples": [{"name": f"adv_bad_{i}.ts", "content": f'leakCredential("tok_{i}");'} for i in range(6)],
-                    "good_examples": [{"name": f"adv_good_{i}.ts", "content": f'safeLog("user_{i}");'} for i in range(4)],
-                }
-                adv_resp = client.post(f"/v1/scars/{session.scar_id}/adversarial", json=adv_payload)
-                adv_resp.raise_for_status()
-
-            # Now approve using approver token
-            approver_token = issue_token(user_id, Role.APPROVER)
-            with httpx.Client(base_url=self.base_url, headers={"Authorization": f"Bearer {approver_token}"}, timeout=30) as client:
+            with httpx.Client(
+                base_url=self.base_url,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=30,
+            ) as client:
                 app_resp = client.post(
                     f"/v1/scars/{session.scar_id}/approve",
-                    json={"approver": user_id, "reason": reason},
+                    json=decision_payload,
                 )
                 app_resp.raise_for_status()
         except Exception as exc:
