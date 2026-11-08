@@ -17,64 +17,75 @@ This repository is **the product, not just a hack**: it contains the workflow pl
 
 ## How Switch is used
 
-NOPE is designed natively around Switch rooms and multi-agent coordination:
+NOPE is designed natively around Switch rooms and multi-agent coordination. Instead of relying on a single agent trying to review its own work, NOPE introduces a **Three-Agent Courtroom** inside Switch rooms where competing agents debate, attack, and verify safety rules before any human approves them.
 
-1. **The Room**: The incident postmortem or engineering channel (e.g. `#incidents`) is bridged directly into Switch (Console / Mattermost bridge). All context originates where engineers discuss what broke.
-2. **The `@nope` Agent**: An autonomous agent resides in the room following [`switch/nope-agent/brief.md`](switch/nope-agent/brief.md). It monitors room threads, acknowledges `@nope teach <incident>`, extracts invariants, and queries developers for scope and rollout boundaries.
-3. **Approval Happening in the Room**: After the rule candidate passes Rule Lab replay and an independent adversarial challenge, NOPE issues a cryptographic approval ticket (`evidence_sha256`). A human engineer must approve the proposal in the room (`@nope approve <rationale>`). The agent is strictly forbidden from self-signing human approvals.
-4. **CI Results Posted Back to the Room**: When CI detects a violation on a Pull Request, the CI gate (`nope-room` / `scripts/enforce.sh`) posts the structured evidence bundle directly back to the Switch room, linking the exact failing code line back to the original postmortem message, invariant, and remediation.
+### 1. The Connected Agents
+
+| Agent | Role & Brief | Responsibility in Switch Room |
+|---|---|---|
+| **`@nope`** | **Rule Synthesizer**<br>([`switch/nope-agent/brief.md`](switch/nope-agent/brief.md)) | Monitors the incident channel. When an engineer posts `@nope teach <incident>`, it investigates the target repository, synthesizes invariant rules (Semgrep patterns), creates test fixtures, and submits candidate rules to the Rule Lab. |
+| **`@red-team`** | **Independent Adversary**<br>([`switch/red-team/brief.md`](switch/red-team/brief.md)) | Operates with a distinct agent key. It receives candidate rules and attempts to bypass them using 8 real-world mutation vectors (nested logging, re-aliased credentials, string interpolation, custom formatters). It actively tries to prove the rule is too naive. |
+| **`@nope-reviewer`** | **Courtroom Judge**<br>([`switch/nope-reviewer/brief.md`](switch/nope-reviewer/brief.md)) | Evaluates both agents' evidence. It enforces strict acceptance criteria: 100% detection of adversarial variants, 0 false positives against safe controls, and zero scanner errors. If satisfied, it signs the cryptographic `evidence_sha256` manifest. |
+| **Human SRE** | **Cryptographic Approver**<br>(Role: `approver`) | Reviews the courtroom transcript in the room and authorizes the rule (`@nope approve <rationale>`). **Agents are strictly forbidden from self-signing human approvals**; nope-core enforces HMAC token role verification. |
+
+### 2. Channel Setup
+
+1. **Room Creation**: Create a Switch room named `#incidents` (or `nope-never-again`) via Switch Console or bridged to your team's chat platform (Mattermost / Slack).
+2. **Attach Context**: Attach this target repository (`praveenkumarpranjal/nope-switch`) as context so agents can read `.github/workflows`, source code, and existing test fixtures.
+3. **Register Agents**: Register `@nope`, `@red-team`, and `@nope-reviewer` in Switch Console using the exact instructions in [`docs/switch-setup.md`](docs/switch-setup.md) and [`docs/switch-live-demo.md`](docs/switch-live-demo.md).
+4. **Agent Protocol**: The `nope_switch` adapter communicates via the native Switch Agent Protocol (WebSockets and dynamic `/ops` HTTP schema discovery).
+5. **CI Results Posted to Room**: When CI detects a violation on any future developer Pull Request, the CI gate (`nope-room` / `scripts/enforce.sh`) posts the structured evidence bundle directly back to the Switch room, linking the exact failing code line back to the original postmortem message and remediation.
 
 > **Note on Rule Synthesis**: The built-in dispatcher simulator uses a deterministic reference rule (`pattern: leakCredential($X)`) for automated testing and reproducible demos; in production deployments, the coding agent following [`switch/nope-agent/brief.md`](switch/nope-agent/brief.md) investigates the target repository and writes bespoke Semgrep rules and test fixtures.
 
 ## What you get
 
-- **`@nope` Switch agent brief** — a reviewable brief that makes the coding agent use the workbench instead of improvising against production.
-- **Switch Room Runtime & CLI (`nope_switch`)** — Console transport client, live room listener, evidence generator, automated PR creator, and the `nope-room` CLI.
-- **nope-core** — FastAPI backend with an append-only Scar Ledger, PostgreSQL support, SQLite for local development, API-key RBAC and OpenAPI.
+- **Three-Agent Courtroom (`apps/switch`)** — Connected Switch room runtime, agent briefs (`@nope`, `@red-team`, `@nope-reviewer`), adversarial mutation engine, and the `nope-room` CLI.
+- **nope-core** — Production FastAPI backend with an append-only Scar Ledger, PostgreSQL support, SQLite for local development, API-key RBAC and OpenAPI docs.
 - **Async validation queue** — `POST /v1/scars/{id}/validate` returns `202 Accepted`; a dedicated `nope-worker` process executes Semgrep jobs and updates `GET /v1/validations/{job_id}`.
-- **Rule Lab** — validates generated rules against:
-  - adversarial fixtures the rule **must** flag,
-  - known-good examples the rule **must not** flag,
-  - the existing repository, using a baseline so legacy violations are warned about rather than silently made blocking.
-- **The demo target service** — a small, strict TypeScript API with auth middleware, a logger and tests. The safe version passes CI.
-- **CI enforcement** — fails only on newly introduced violations; existing findings become a baseline report.
-- **Audit trail** — every proposal, validation, approval, activation, challenge and exception is tied to the original room message and incident.
-- **Production packaging** — Docker, Compose/Postgres, API-key authentication, environment-driven configuration, migrations and an offline fallback demo.
+- **Rule Lab** — Validates generated rules against adversarial fixtures (must flag), known-good examples (must not flag), and existing repository baselines.
+- **Demo target service (`demo-app`)** — Strict TypeScript service with auth middleware, logger, and full test suite.
+- **CI enforcement (`scripts/enforce.sh`)** — Fails only on newly introduced violations; existing findings become a baseline report.
+- **Audit trail** — Every proposal, validation, approval, activation, challenge and exception is tied to the original room message and incident.
+- **Production packaging** — Docker container, Compose/PostgreSQL stack, API-key authentication, and an offline fallback demo.
 
-## Fastest path to the "oh damn" moment
+## Quickstart: How to Run It (Judge Evaluation in < 2 Minutes)
 
-Requirements: Python 3.12+, Node 20+, Semgrep, Git, Switch and one supported coding agent.
+NOPE is fully reproducible with local commands. Judges can evaluate the entire multi-agent loop, backend ledger, and CI gate in four quick steps:
+
+### Prerequisites
 
 ```sh
 git clone https://github.com/praveenkumarpranjal/nope-switch.git
 cd nope-switch
-cp .env.example .env  # replace demo keys for production
+cp .env.example .env
 uv sync --extra dev --extra semgrep
 npm --prefix demo-app ci
-uv run pytest
-uv run nope-demo reset
-uv run nope-demo teach
-uv run nope-demo validate
-uv run nope-demo adversarial
-uv run nope-demo approve 1
-uv run nope-demo activate 1
 ```
 
-Then in the room that has the Switch GitHub reference and safe auth/MCP permissions for the NOPE agent:
+### 1. Test the Multi-Agent Courtroom
 
-```text
-@nope teach "We had another security incident because someone logged the Authorization header. Never log credentials or tokens anywhere in this repository."
+Demonstrates `@nope` proposing a naive rule, `@red-team` attacking and rejecting it, followed by a taint-tracking rule achieving 100% detection and 0 false positives:
+
+```sh
+uv run nope-room courtroom
 ```
 
-NOPE answers with:
+*Expected output*: Naive candidate `REJECT` (0 detected, 8 missed); Taint candidate `PASS` (8 detected, 0 missed, 0 false positives).
 
-```text
-I need two decisions before I create Scar 001:
-1. Should the scope be this repository or all services in the workspace?
-2. Should existing incidents be warned, or blocked on future pull requests only?
+### 2. Test the Real HTTP Backend, Ledger & Async Queue
+
+Boots an isolated FastAPI instance, exercises HMAC authentication, Scar lifecycle (#1 proposal → validation → human approval → activation), and verifies the ledger:
+
+```sh
+uv run python scripts/smoke_backend.py
 ```
 
-When you approve, it opens a PR containing the rule, fixtures and provenance. The deterministic enforcement demo makes the same lesson unbreachable:
+*Expected output*: `smoke test passed` with green test report against SQLite or PostgreSQL.
+
+### 3. Test Developer Pull Request CI Gate (Exit Code 42)
+
+Simulates the end-to-end developer experience: an incident is taught, validated, approved, activated, and then a developer attempts to commit code re-introducing the vulnerability:
 
 ```sh
 uv run nope-demo reset
@@ -86,7 +97,45 @@ uv run nope-demo activate 1
 uv run nope-demo scan-bad
 ```
 
-`scan-bad` exits with `42` and prints the Scar reference, reason and remediation.
+*Expected output*: `scan-bad` exits with code `42`, blocking the pull request and printing the exact Scar reference, invariant rationale, and remediation.
+
+### 4. Run the Full Test Suite
+
+Verifies backend invariants, cryptographic role boundaries, and the TypeScript target service:
+
+```sh
+uv run pytest
+npm --prefix demo-app test
+```
+
+*Expected output*: 152 Python tests passing, 4 TypeScript tests passing.
+
+---
+
+## Live Room Interaction
+
+When running in a live Switch room with connected agents:
+
+1. **Report Incident**:
+   ```text
+   @nope teach "We had INC-014: someone logged the Authorization header. Never log credentials or tokens anywhere in this repository."
+   ```
+2. **Scope Decision**:
+   NOPE queries in-thread:
+   ```text
+   I need two decisions before I create Scar 001:
+   1. Should the scope be this repository or all services in the workspace?
+   2. Should existing incidents be warned, or blocked on future pull requests only?
+   ```
+3. **Courtroom Challenge**:
+   `@red-team` challenges the candidate rule with adversarial variants. `@nope-reviewer` tallies detection score.
+4. **Human Approval**:
+   The human SRE confirms the cryptographic approval ticket:
+   ```text
+   @nope approve "Verified taint coverage catches re-aliased credentials. Approved for main."
+   ```
+5. **Automated PR & CI Gate**:
+   NOPE opens the Pull Request with the Semgrep rule and fixtures. Upon merge, CI enforces the rule on all future code.
 
 ## Architecture
 
